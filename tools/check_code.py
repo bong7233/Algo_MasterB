@@ -45,7 +45,11 @@ SKIPFILE = ROOT / "tools" / "code_check_skip.txt"
 PY = "python3.13"
 CXX = ["g++", "-std=c++17", "-O2"]
 
-FENCE = re.compile(r"^```(\w+)")
+FENCE = re.compile(r"^```(\w+)(.*)$")
+# 제목에 "(조각)" 이 붙은 블록은 앞 블록의 정의를 이어받는다. 단독 실행이 불가능한 것이
+# 정상이므로 건너뛴다. 이 표기는 검사기만이 아니라 독자에게도 같은 사실을 알린다 —
+# STYLE.md §6.4 가 요구하는 "조각이면 조각임을 밝힌다" 를 한 번에 만족시킨다.
+FRAGMENT = "(조각)"
 # 표준입력을 읽는 코드는 입력 없이는 못 돌린다. 이런 블록은 챕터가 입력 예시를
 # 본문에 함께 싣는 형태라 여기서 판정할 수 없다.
 NEEDS_STDIN = re.compile(r"\binput\s*\(|sys\.stdin|std::cin|\bcin\s*>>|getline\s*\(")
@@ -81,6 +85,8 @@ def dual_blocks(md: str) -> list[tuple[int, dict[str, str]]]:
                 m = FENCE.match(lines[i])
                 if m:
                     lang = m.group(1)
+                    if FRAGMENT in (m.group(2) or ""):
+                        lang = "_frag_" + lang
                     i += 1
                     body: list[str] = []
                     while i < len(lines) and not lines[i].startswith("```"):
