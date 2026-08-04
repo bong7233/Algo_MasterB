@@ -14,7 +14,7 @@
     3. Part II~X 알고리즘 챕터에 `::: classify` 가 있는가
     4. `::: dual` 뒤 20줄 안에 복잡도 표기가 있는가
     5. 챕터 대비 glossary.json 항목이 늘었는가
-    6. 본문이 6,000자 이상인가 (§4 밀도)
+    6. 본문이 6,000~12,000자인가 (§4 밀도)
     7. `::: classify` 에 4항목이 다 있는가
 
 사용법:
@@ -41,7 +41,8 @@ import build  # noqa: E402
 CONTENT = ROOT / "content"
 GLOSSARY = CONTENT / "glossary.json"
 
-MIN_CHARS = 6000  # §4 밀도 하한
+MIN_CHARS = 6000   # §4 밀도 하한
+MAX_CHARS = 12000  # §4 밀도 상한. 길면 안 읽는다
 
 # §4-5 손추적 필수 챕터 (생략 불가)
 TRACE_REQUIRED = {
@@ -193,6 +194,15 @@ def check_chapter(rp: Reporter, path: Path, cid: str, md: str) -> None:
             1,
             f"본문 {chars:,}자 — 기준 {MIN_CHARS:,}자 미만(§4). "
             "늘리라는 뜻이 아니라 빠진 단계가 없는지 보라는 뜻이다",
+        )
+    elif chars > MAX_CHARS:
+        # 상한도 규범이다. 한 절이 30분을 넘으면 읽다가 만다. 넘겼다면 둘로 쪼개거나
+        # 곁가지를 덜어내라는 신호다 — 잘라내라는 뜻은 아니다.
+        rp.warn(
+            path,
+            1,
+            f"본문 {chars:,}자 — 기준 {MAX_CHARS:,}자 초과(§4). "
+            "쪼개거나 곁가지를 덜어낼 곳이 없는지 보라",
         )
 
 
