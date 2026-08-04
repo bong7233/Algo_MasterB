@@ -511,6 +511,22 @@
         // 하노이의 기저 호출(base)은 "여기서 멈춘다"는 뜻이라 해와 같은 칸에 센다.
         m.cSol[i + 1] = m.cSol[i] + ((nd.kind === 'sol' || nd.kind === 'base') ? 1 : 0);
       }
+      /* 하노이의 "원반을 옮기는 순간"은 노드에 들어갈 때가 아니라 **왼쪽 자식의
+       * 부분트리가 끝난 뒤**다. 그 순서가 곧 hanoi 의 세 줄(왼쪽 재귀 → 이동 →
+       * 오른쪽 재귀)이므로, 노드 방문 수로 이동 수를 대신 세면 거짓말이 된다.
+       * DFS 순서에서 왼쪽 부분트리는 [첫째 자식, 둘째 자식 - 1] 구간이다. */
+      if (problem === 'hanoi') {
+        m.cMov = new Int32Array(nn + 1);
+        var mk = new Int32Array(nn);
+        for (var h = 0; h < nn; h++) {
+          var hn = m.nodes[h];
+          if (hn.kids.length === 2) {
+            var j = hn.kids[1] - 1;
+            if (j >= 0 && j < nn) mk[j] += 1;
+          }
+        }
+        for (var h2 = 0; h2 < nn; h2++) m.cMov[h2 + 1] = m.cMov[h2] + mk[h2];
+      }
       m.total = m.visited + m.pruned;
       model = m;
       layout = null;
@@ -586,7 +602,9 @@
     function computeLayout(w) {
       var compact = w < COMPACT;
       var side = (w >= SIDE_MIN && model.leaves <= SIDE_MAX_LEAVES) ? (w >= 860 ? 180 : 150) : 0;
-      var gut = (w >= 520) ? 46 : 14;              // 깊이 라벨 자리
+      /* 깊이 라벨 자리. 폰에서도 없애지 않는다 — "한 층이 한 행" 이라는 대응이
+       * 이 트리를 읽는 열쇠라, 폭을 조금 내주더라도 축은 남긴다. */
+      var gut = (w >= 520) ? 46 : 30;
       // 카운터 패널 + 논지 두 줄. 논지가 잘리면 이 위젯의 결론이 사라진다.
       var headerH = compact ? (26 * 2 + 4 + 44) : (62 + 44);
       var levels = model.maxDepth + 1;
@@ -699,11 +717,11 @@
         statPanel(ctx, T, pad, 6, hw, L.compact ? 26 : 62, '호출 트리 (가지치기 없음)', [
           ['호출', comma(vis) + (done ? '' : ' / ' + comma(model.visited))],
           ['기저 h0', comma(sol)],
-          ['옮긴 원반', comma(vis - sol)]
+          ['옮긴 원반', comma(model.cMov[upto]) + (done ? '' : ' / ' + comma(model.moves))]
         ], true, L.compact);
-        thesis(ctx, T, L, '호출 ' + comma(model.visited) + '개 = 2^' + (n + 1) + ' − 1. ' +
-               '원반이 하나 늘 때마다 호출이 두 배가 된다 — 원반 20개면 100만 번이다. ' +
-               '자를 가지는 없다. 모든 호출이 필요한 일을 한다.', false);
+        thesis(ctx, T, L, '호출 ' + comma(model.visited) + '개 = 2^' + (n + 1) + ' − 1, ' +
+               '그중 절반인 ' + comma(model.sols) + '개가 기저다. ' +
+               '원반이 하나 늘 때마다 호출이 두 배가 된다 — 20개면 100만 번이다.', false);
         return;
       }
 
@@ -773,18 +791,17 @@
 
       var bottomY = L.treeTop + 12 + (L.levels - 1) * L.levelH;
 
-      // 깊이 라벨
-      if (L.gut > 20) {
-        for (var d = 0; d < L.levels; d++) {
-          var lab = (problem === 'hanoi')
-            ? (d === 0 ? '호출' : '깊이 ' + d)
-            : (problem === 'nqueens' ? (d === 0 ? '빈 판' : '행 ' + (d - 1))
-              : problem === 'subset' ? (d === 0 ? '시작' : '물건 ' + (d - 1))
-              : (d === 0 ? '시작' : '자리 ' + (d - 1)));
-          ctx.globalAlpha = 0.75;
-          text(ctx, lab, 4, L.treeTop + 16 + d * L.levelH, '10px ' + FONT, T.fgFaint);
-          ctx.globalAlpha = 1;
-        }
+      // 깊이 라벨. 좁으면 접두어를 떼고 숫자만 남긴다.
+      var tight = L.gut < 40;
+      for (var d = 0; d < L.levels; d++) {
+        var lab = (problem === 'hanoi')
+          ? (d === 0 ? (tight ? '0' : '호출') : (tight ? String(d) : '깊이 ' + d))
+          : (problem === 'nqueens' ? (d === 0 ? (tight ? '—' : '빈 판') : (tight ? '행' + (d - 1) : '행 ' + (d - 1)))
+            : problem === 'subset' ? (d === 0 ? (tight ? '—' : '시작') : (tight ? '물' + (d - 1) : '물건 ' + (d - 1)))
+            : (d === 0 ? (tight ? '—' : '시작') : (tight ? '칸' + (d - 1) : '자리 ' + (d - 1))));
+        ctx.globalAlpha = 0.75;
+        text(ctx, lab, 4, L.treeTop + 16 + d * L.levelH, '10px ' + FONT, T.fgFaint);
+        ctx.globalAlpha = 1;
       }
 
       // ① 간선
@@ -794,7 +811,11 @@
         if (nd.p < 0 || nd.p > shown) continue;
         var pa = nodes[nd.p];
         var stacked = onStack[i] && onStack[nd.p];
-        ctx.globalAlpha = nd.kind === 'cut' ? 0.55 : (stacked ? 1 : 0.5);
+        /* 잘린 간선이 굵고 붉으면 노드가 작아지는 순간(잎이 100개를 넘어가면
+         * 노드는 2~3px 가 된다) 화면이 붉은 실뭉치가 되어 트리 모양이 사라진다.
+         * 노드가 작을수록 간선을 흐리게 해서 잉크의 주인공을 노드에 남긴다. */
+        ctx.globalAlpha = nd.kind === 'cut' ? Math.min(0.55, 0.16 + L.r * 0.1)
+                                            : (stacked ? 1 : 0.5);
         ctx.strokeStyle = stacked ? T.accent : (nd.kind === 'cut' ? T.boxDanger : T.border);
         ctx.lineWidth = stacked ? 2 : 1;
         ctx.beginPath();
@@ -836,12 +857,12 @@
         taken.push(x0, x1);
         return true;
       }
-      if (L.r >= 2) {
+      if (L.r >= 1.2) {
         for (var g = 0; g <= shown; g++) {
           var cn = nodes[g];
           if (cn.kind !== 'cut' || cn.skip < 2 || cn.d >= L.levels - 1) continue;
           var half = Math.min(L.slotW * 1.7, (L.levels - 1 - cn.d) * L.levelH * 0.34);
-          if (half < 2) continue;
+          if (half < 2.5) continue;
           ctx.globalAlpha = 0.12;
           ctx.fillStyle = T.fgFaint;
           ctx.beginPath();
@@ -888,11 +909,14 @@
 
       if (nd.kind === 'cut') {
         // 잘린 노드: 사각형(원과 모양으로 갈린다, 계약 §5). × 는 간선 위에 있다.
+        // 아무리 촘촘해도 2.2px 아래로는 줄이지 않는다 — 이 위젯의 주인공이라
+        // 사라지면 안 된다.
+        var cr = Math.max(r, 2.2);
         ctx.fillStyle = T.boxDanger;
         ctx.globalAlpha = 0.92;
-        ctx.fillRect(x - r, y - r, r * 2, r * 2);
+        ctx.fillRect(x - cr, y - cr, cr * 2, cr * 2);
         ctx.globalAlpha = 1;
-        if (r < 4) {
+        if (r >= 2.5 && r < 4) {
           // 너무 작아 간선 표시가 안 보이는 크기에서는 노드에 직접 × 를 긋는다.
           ctx.strokeStyle = T.bg;
           ctx.lineWidth = 1;
@@ -902,9 +926,17 @@
           ctx.stroke();
         }
       } else if (nd.kind === 'fail') {
-        ctx.globalAlpha = 0.85;
+        /* 다크 테마에서 --w-wall 은 배경보다 겨우 한 단계 밝다. 잎까지 갔다가
+         * 실패한 노드는 가지치기를 껐을 때 수백 개가 깔리는데, 그것들이 배경에
+         * 묻히면 "헛일한 잎" 이라는 이 위젯의 두 번째 논지가 통째로 사라진다.
+         * 글자색 계열로 테두리를 둘러 두 테마 모두에서 보이게 한다. */
+        var fr = Math.max(r * 0.85, 1.6);
+        ctx.globalAlpha = 0.9;
         ctx.fillStyle = T.wWall;
-        ctx.fillRect(x - r * 0.85, y - r * 0.85, r * 1.7, r * 1.7);
+        ctx.fillRect(x - fr, y - fr, fr * 2, fr * 2);
+        ctx.globalAlpha = 0.4;
+        ctx.strokeStyle = T.fgFaint;
+        ctx.strokeRect(x - fr + 0.5, y - fr + 0.5, fr * 2 - 1, fr * 2 - 1);
         ctx.globalAlpha = 1;
       } else if (nd.kind === 'sol' || nd.kind === 'base') {
         // 마름모 = 확정. 금색은 "확정" 전용이라 여기서만 쓴다.
@@ -937,8 +969,8 @@
       }
 
       // 글자는 자리가 있을 때만. 뭉개진 글자는 없는 것만 못하다.
-      if (r >= 7 && nd.txt) {
-        var fs = Math.min(Math.round(r * 1.15), 13);
+      if (r >= 5.5 && nd.txt) {
+        var fs = Math.max(8, Math.min(Math.round(r * 1.15), 13));
         var col = (nd.kind === 'sol' || nd.kind === 'base') ? T.bg
                 : (nd.kind === 'cut' ? T.bg : T.fg);
         ctx.font = '700 ' + fs + 'px ' + FONT;
@@ -1135,7 +1167,8 @@
         var vis = model.cVis[i + 1], cutn = model.cCut[i + 1], sol = model.cSol[i + 1];
         var s = nd.say || '';
         if (problem === 'hanoi') {
-          return s + '  ▸ 지금까지 호출 ' + comma(vis) + '개, 기저 ' + comma(sol) + '개.';
+          return s + '  ▸ 지금까지 호출 ' + comma(vis) + '개, 기저 ' + comma(sol) +
+                 '개, 실제로 옮긴 원반 ' + comma(model.cMov[i + 1]) + '개.';
         }
         return s + '  ▸ 지금까지 방문 ' + comma(vis) + '개, 잘림 ' + comma(cutn) +
                '개, 해 ' + comma(sol) + '개. (가지치기 ' + (prune ? 'ON' : 'OFF') + ')';
