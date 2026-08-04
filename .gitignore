@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+.DS_Store
+Thumbs.db
+
+.vscode/
+.idea/
+*.swp
+
+# 벤치마크 산출 바이너리 — 소스만 커밋한다
+tools/bench/*.out
+tools/bench/build/
+
+# assets/bundle.js 와 algobook.html 은 커밋한다.
+# 파이썬 없이 index.html 만 열어도 동작해야 하기 때문이다.
