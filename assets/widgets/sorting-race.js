@@ -123,7 +123,6 @@
     return '013678'.indexOf(s.charAt(s.length - 1)) >= 0;
   }
   function ul(n) { return n + (jong(n) ? '을' : '를'); }
-  function wa(n) { return n + (jong(n) ? '과' : '와'); }
   function iga(n) { return n + (jong(n) ? '이' : '가'); }
 
   // ─── 입력 프리셋 ─────────────────────────────────────────────────────────
@@ -669,9 +668,14 @@
         if (!p.sorted) tail.push('정렬 실패');
         if (p.truncated) tail.push('스텝 상한에서 잘림');
         if (tail.length) {
+          var tx = box.x + PAD + ctx.measureText(line).width + 22;
           ctx.font = '700 10.5px ' + FONT;
-          ctx.fillStyle = (!p.sorted || p.truncated) ? T.boxDanger : T.wPath;
-          ctx.fillText('← ' + tail.join(' · '), box.x + PAD + ctx.measureText(line).width + 26, box.y + 27);
+          var tt = '← ' + tail.join(' · ');
+          // 패널 폭을 넘으면 아예 그리지 않는다. 잘린 글자는 없느니만 못하다.
+          if (tx + ctx.measureText(tt).width <= box.x + L.paneW - PAD) {
+            ctx.fillStyle = (!p.sorted || p.truncated) ? T.boxDanger : T.wPath;
+            ctx.fillText(tt, tx, box.y + 27);
+          }
         }
       }
 
@@ -693,7 +697,9 @@
         var bx = x0 + i * bw;
         var bwv = Math.max(1, bw - (bw > 4 ? 1.2 : 0.4));
 
-        var color = T.fgFaint, alpha = 0.75;
+        // 아직 정렬 안 된 칸은 옅은 회색, 정렬된 구간은 진한 파랑. 두 색의 명도
+        // 차이가 크지 않아(라이트에서 특히) 농도까지 함께 벌려야 구간 경계가 읽힌다.
+        var color = T.fgFaint, alpha = 0.55;
         if (done) { color = T.wPath; alpha = 0.9; }
         else if (srt[i]) { color = T.wVisited; alpha = 1; }
 
@@ -719,10 +725,10 @@
       }
       ctx.globalAlpha = 1;
 
-      // 활성 구간(병합·퀵의 [lo,hi))을 밑줄로 표시한다.
-      if (!done && s.lo !== undefined && s.hi !== undefined) {
-        var rlo = s.lo, rhi = (s.t === 'cmp' || s.t === 'sw' || s.t === 'wr' || s.t === 'take')
-          ? (s.mid !== undefined ? s.hi - 1 : s.hi) : s.hi;
+      // 활성 구간을 밑줄로 표시한다. 병합의 hi 는 열린 끝이고 퀵의 hi 는 닫힌 끝이라
+      // 마지막 칸을 서로 다르게 잡는다. 'seal' 은 확정 사건이지 활성 구간이 아니다.
+      if (!done && s.t !== 'seal' && s.lo !== undefined && s.hi !== undefined) {
+        var rlo = s.lo, rhi = (s.mid !== undefined ? s.hi - 1 : s.hi);
         ctx.globalAlpha = 0.75;
         ctx.strokeStyle = T.wFrontier;
         ctx.lineWidth = 2;
@@ -776,33 +782,56 @@
       ctx.strokeRect(box.x + 0.5, box.y + 0.5, L.paneW - 1, L.paneH - 1);
     }
 
+    /* 막대 아래 표식. 폭이 넉넉하면 글자, 좁으면 **모양**으로 구분한다.
+     * 좁은 폭에서 전부 같은 삼각형을 쓰면 색만 다른 표식이 되어, 색을 구분하지
+     * 못하는 독자에게는 아무 정보도 남지 않는다(계약 §5). 그래서 사건 종류마다
+     * 다른 도형을 준다: 빈 삼각 = 견줌, 채운 삼각 = 씀, 마름모 = 손에 든 키, 사각 = 피벗. */
     function drawMarks(ctx, T, L, s, x0, y, bw) {
       var small = bw < 9;
       ctx.font = '700 ' + (small ? 8 : 9.5) + 'px ' + MONO;
       ctx.textAlign = 'center';
-      function put(i, ch, color) {
-        if (i == null || i < 0 || i >= n) return;
+
+      function shape(cx, kind, color) {
         ctx.fillStyle = color;
-        if (small) {
-          // 글자가 들어갈 폭이 없으면 삼각 표식으로 방향만 준다.
-          var cx = x0 + i * bw + bw / 2;
-          ctx.beginPath();
-          ctx.moveTo(cx, y - 6);
-          ctx.lineTo(cx - 3, y - 1);
-          ctx.lineTo(cx + 3, y - 1);
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        if (kind === 'square') {
+          ctx.rect(cx - 2.5, y - 5.5, 5, 5);
+          ctx.fill();
+          return;
+        }
+        if (kind === 'diamond') {
+          ctx.moveTo(cx, y - 7); ctx.lineTo(cx + 3.2, y - 3.5);
+          ctx.lineTo(cx, y); ctx.lineTo(cx - 3.2, y - 3.5);
           ctx.closePath();
           ctx.fill();
-        } else {
-          ctx.fillText(ch, x0 + i * bw + bw / 2, y);
+          return;
         }
+        ctx.moveTo(cx, y - 6.5);
+        ctx.lineTo(cx - 3.2, y - 1);
+        ctx.lineTo(cx + 3.2, y - 1);
+        ctx.closePath();
+        if (kind === 'hollow') ctx.stroke(); else ctx.fill();
       }
-      if (s.t === 'cmp') { put(s.i, '↑', T.wFrontier); put(s.j, '↑', T.wFrontier); }
-      else if (s.t === 'cmpk') { put(s.i, '↑', T.wFrontier); put(s.kx, '키', T.wPath); }
-      else if (s.t === 'lift') { put(s.i, '키', T.wPath); }
-      else if (s.t === 'sw') { put(s.i, '⇄', T.boxWarn); put(s.j, '⇄', T.boxWarn); }
-      else if (s.t === 'wr') { put(s.i, '쓰', T.boxWarn); if (s.kx !== undefined) put(s.kx, '키', T.wPath); }
-      else if (s.t === 'take') { put(s.i, '↑', T.boxWarn); }
-      if (s.pivot !== undefined) put(s.pivot, 'P', T.wGoal);
+
+      function put(i, ch, color, kind) {
+        if (i == null || i < 0 || i >= n) return;
+        // 퀵 정렬은 언제나 피벗과 견주므로 피벗 칸에 표식이 두 개 겹친다.
+        // 그 칸에서는 'P' 만 남긴다 — 피벗이라는 사실이 더 많은 것을 설명한다.
+        if (s.pivot !== undefined && i === s.pivot && kind !== 'square') return;
+        var cx = x0 + i * bw + bw / 2;
+        if (small) shape(cx, kind, color);
+        else { ctx.fillStyle = color; ctx.fillText(ch, cx, y); }
+      }
+
+      if (s.t === 'cmp') { put(s.i, '↑', T.wFrontier, 'hollow'); put(s.j, '↑', T.wFrontier, 'hollow'); }
+      else if (s.t === 'cmpk') { put(s.i, '↑', T.wFrontier, 'hollow'); put(s.kx, '키', T.wPath, 'diamond'); }
+      else if (s.t === 'lift') { put(s.i, '키', T.wPath, 'diamond'); }
+      else if (s.t === 'sw') { put(s.i, '⇄', T.boxWarn, 'fill'); put(s.j, '⇄', T.boxWarn, 'fill'); }
+      else if (s.t === 'wr') { put(s.i, '쓰', T.boxWarn, 'fill'); if (s.kx !== undefined) put(s.kx, '키', T.wPath, 'diamond'); }
+      else if (s.t === 'take') { put(s.i, '↑', T.boxWarn, 'fill'); }
+      if (s.pivot !== undefined) put(s.pivot, 'P', T.wGoal, 'square');
       ctx.textAlign = 'left';
     }
 
@@ -834,6 +863,10 @@
     // ---- 상태 줄 ----
     function valAt(s, i) { return s.arr[i]; }
 
+    // "a[3](=12)" 뒤에 붙는 조사는 괄호 안의 **값**을 읽은 소리를 따른다.
+    // 화면이 읽어 주는 문장이라 조사가 틀리면 그대로 눈에 띈다.
+    function cell(s, i) { return 'a[' + i + '](=' + valAt(s, i) + ')'; }
+
     function describe(p, i) {
       var s = stepOf(p, i);
       var nm = p.name;
@@ -844,22 +877,22 @@
       if (s.t === 'cmp') {
         var vi = valAt(s, s.i), vj = valAt(s, s.j);
         var rel = vi === vj ? '같다' : (vi > vj ? '더 크다' : '더 작다');
-        var head = nm + ' — a[' + s.i + '](=' + vi + ')' + wa(vj === vi ? vi : vi) ;
-        head = nm + ' — a[' + s.i + '](=' + vi + ')' + '와 a[' + s.j + '](=' + vj + ')' + '를 견준다. ' +
-          iga(vi) + ' ' + rel + '.';
-        if (s.pivot !== undefined) head += ' 피벗은 a[' + s.pivot + '](=' + valAt(s, s.pivot) + ').';
-        if (s.mid !== undefined) head += ' 두 런 [' + s.lo + ',' + s.mid + ') 과 [' + s.mid + ',' + s.hi + ') 을 합치는 중이다.';
+        var head = nm + ' — ' + cell(s, s.i) + (jong(vi) ? '과 ' : '와 ') +
+          cell(s, s.j) + (jong(vj) ? '을' : '를') + ' 견준다. ' + iga(vi) + ' ' + rel + '.';
+        if (s.pivot !== undefined) head += ' 피벗은 ' + cell(s, s.pivot) + '.';
+        if (s.mid !== undefined) head += ' 두 런 [' + s.lo + ',' + s.mid + ')과 [' + s.mid + ',' + s.hi + ')을 합치는 중이다.';
         if (s.heap !== undefined) head += ' 힙 구간은 0..' + (s.heap - 1) + '.';
         return head + ' (비교 ' + s.cmp + ')';
       }
       if (s.t === 'cmpk') {
         var v = valAt(s, s.i);
-        return nm + ' — 손에 든 키 ' + s.key + '를 a[' + s.i + '](=' + v + ')' + '와 견준다. ' +
+        return nm + ' — 손에 든 키 ' + ul(s.key) + ' ' + cell(s, s.i) + (jong(v) ? '과' : '와') + ' 견준다. ' +
           (v > s.key ? iga(v) + ' 더 크므로 한 칸 오른쪽으로 민다.' : '키가 들어갈 자리를 찾았다.') +
           ' (비교 ' + s.cmp + ')';
       }
       if (s.t === 'lift') {
-        return nm + ' — a[' + s.i + '](=' + s.key + ')' + '를 손에 들어낸다. 이 자리가 빈칸이 되고, ' +
+        return nm + ' — a[' + s.i + '](=' + s.key + ')' + (jong(s.key) ? '을' : '를') +
+          ' 손에 들어낸다. 이 자리가 빈칸이 되고, ' +
           '앞의 정렬 구간에서 들어갈 곳을 찾는다. 아직 배열은 바뀌지 않았다.';
       }
       if (s.t === 'wr') {
@@ -869,16 +902,24 @@
         return nm + ' — a[' + s.i + ']에 ' + ul(s.val) + ' 쓴다. 한 칸 밀렸다. (이동 ' + s.mv + ')';
       }
       if (s.t === 'sw') {
-        if (s.noop) return nm + ' — a[' + s.i + ']와 a[' + s.j + ']를 맞바꾼다. 값이 같아 실제로 바뀐 것은 없다. (이동 ' + s.mv + ')';
-        return nm + ' — a[' + s.i + '](=' + valAt(s, s.i) + ')' + '와 a[' + s.j + '](=' + valAt(s, s.j) + ')' +
-          '를 맞바꾼다. 교환 한 번은 쓰기 두 번이다. (이동 ' + s.mv + ')';
+        if (s.noop) {
+          return nm + ' — a[' + s.i + ']' + (jong(s.i) ? '과 ' : '와 ') + 'a[' + s.j + ']' +
+            (jong(s.j) ? '을' : '를') + ' 맞바꾼다. 값이 같아 실제로 바뀐 것은 없다. (이동 ' + s.mv + ')';
+        }
+        // 교환 스텝의 스냅샷은 이미 바뀐 뒤다. 문장은 "무엇과 무엇을" 이므로
+        // 바뀐 뒤의 값을 서로 바꿔 읽어야 사건 직전의 배치를 가리킨다.
+        var av = valAt(s, s.j), bv = valAt(s, s.i);
+        return nm + ' — a[' + s.i + '](=' + av + ')' + (jong(av) ? '과 ' : '와 ') +
+          'a[' + s.j + '](=' + bv + ')' + (jong(bv) ? '을' : '를') +
+          ' 맞바꾼다. 교환 한 번은 쓰기 두 번이다. (이동 ' + s.mv + ')';
       }
       if (s.t === 'take') {
-        return nm + ' — a[' + s.i + '](=' + valAt(s, s.i) + ')' + '를 보조 배열로 가져간다. ' +
+        var tv = valAt(s, s.i);
+        return nm + ' — ' + cell(s, s.i) + (jong(tv) ? '을' : '를') + ' 보조 배열로 가져간다. ' +
           '보조 배열에 쓰는 것도 이동이다 — 병합 정렬의 O(n) 추가 메모리가 이 칸에 드러난다. (이동 ' + s.mv + ')';
       }
       if (s.t === 'seal') {
-        return nm + ' — 구간 ' + s.lo + '..' + s.hi + '이 정렬 상태로 확정됐다' +
+        return nm + ' — 구간 ' + s.lo + '..' + s.hi + (jong(s.hi) ? '이' : '가') + ' 정렬 상태로 확정됐다' +
           (s.why ? ' (' + s.why + ')' : '') + '.';
       }
       if (s.t === 'done') {
