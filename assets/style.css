@@ -1969,3 +1969,104 @@ details.box-answer > .box-body { padding-top: 10px; }
 /* 모달이 열린 동안 뒤 본문이 스크롤되면 닫았을 때 읽던 자리를 잃는다. */
 body.modal-open { overflow: hidden; }
 .review-card { min-height: 0; }
+
+/* ===================================================================
+   20. 위젯 런타임 크롬 (assets/widgets/_runtime.js 가 만드는 DOM)
+
+   위젯 본체가 무엇을 그리든 껍데기·재생 컨트롤·상태 줄은 공통이다.
+   여기서 한 번만 정의하고 위젯 20여 종이 재사용한다.
+   =================================================================== */
+
+.wk { display: flex; flex-direction: column; gap: 8px; }
+.wk:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: var(--r); }
+
+.wk-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.wk-title { font-size: .82rem; font-weight: 700; color: var(--fg-dim); }
+.wk-slot { margin-left: auto; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
+.wk-stage {
+  position: relative;
+  min-width: 0;
+  overflow-x: auto;      /* 격자가 좁은 화면보다 넓어도 body 를 밀지 않는다 */
+  overscroll-behavior-x: contain;
+}
+.wk-canvas { display: block; max-width: 100%; }
+
+/* ---- 재생 컨트롤 ---- */
+.wk-ctl { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
+.wk-btn {
+  font: inherit;
+  font-size: .82rem;
+  line-height: 1;
+  min-width: 32px;
+  height: 30px;
+  padding: 0 9px;
+  color: var(--fg-dim);
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+.wk-btn:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
+.wk-btn:disabled { opacity: .35; cursor: default; }
+/* ◀ 는 유니코드에 좌향 삼각형이 따로 있지만 폰트마다 폭이 들쭉날쭉하다.
+   같은 글리프를 뒤집어 쓰면 두 버튼의 크기가 확실히 같아진다. */
+.wk-ctl .wk-btn:nth-child(2) { transform: scaleX(-1); }
+.wk-play.is-playing { color: var(--accent); border-color: var(--accent); }
+
+.wk-range { flex: 1 1 120px; min-width: 80px; accent-color: var(--accent); }
+.wk-count { font-size: .76rem; color: var(--fg-faint); font-variant-numeric: tabular-nums; min-width: 4.5em; text-align: right; }
+
+.wk-speed {
+  font: inherit;
+  font-size: .76rem;
+  height: 30px;
+  padding: 0 4px;
+  color: var(--fg-dim);
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+
+/* ---- 상태 줄: 이번 스텝에 무슨 일이 일어났는지 ----
+   색만으로 전달하면 색을 구분하지 못하는 독자에게 위젯이 통째로 사라진다.
+   그래서 이 줄은 장식이 아니라 본문이다. min-height 로 자리를 미리 잡아
+   글자가 들어올 때 아래 내용이 튀지 않게 한다. */
+.wk-status {
+  min-height: 2.6em;
+  font-size: .8rem;
+  line-height: 1.55;
+  color: var(--fg-dim);
+  padding: 7px 10px;
+  background: var(--bg-code);
+  border-radius: var(--r-sm);
+  word-break: keep-all;
+}
+.wk-status:empty::before { content: "재생하거나 ▶ 를 눌러 한 스텝씩 본다."; color: var(--fg-faint); }
+
+/* ---- 위젯 안의 작은 세그먼트 선택기 ---- */
+.wk-seg { display: inline-flex; gap: 1px; padding: 1px; background: var(--bg-code); border-radius: var(--r-sm); }
+.wk-seg-btn {
+  font: inherit;
+  font-size: .74rem;
+  padding: 5px 9px;
+  color: var(--fg-faint);
+  background: none;
+  border: 0;
+  border-radius: 2px;
+  cursor: pointer;
+}
+.wk-seg-btn:hover { color: var(--fg); }
+.wk-seg-btn.is-active { color: var(--accent-fg); background: var(--accent); font-weight: 700; }
+
+/* ---- 범례: 색이 무엇을 뜻하는지 ---- */
+.wk-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: .74rem; color: var(--fg-faint); }
+.wk-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.wk-legend i { width: 10px; height: 10px; border-radius: 2px; flex: none; }
+
+@media (max-width: 699.98px) {
+  .wk-count { min-width: 0; font-size: .72rem; }
+  .wk-range { flex-basis: 60px; }
+  .wk-title { font-size: .78rem; }
+}
