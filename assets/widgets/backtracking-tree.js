@@ -745,7 +745,7 @@
       ctx.font = font;
       var lines = wrapLines(ctx, msg, L.w - 16, 2);
       for (var i = 0; i < lines.length; i++) {
-        text(ctx, lines[i], 8, L.headerH - 30 + i * 14, font, warn ? T.boxWarn : T.fgDim);
+        text(ctx, lines[i], 8, L.headerH - 21 + i * 14, font, warn ? T.boxWarn : T.fgDim);
       }
     }
 

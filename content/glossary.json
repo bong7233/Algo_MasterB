@@ -1284,5 +1284,184 @@
       "assert",
       "단언"
     ]
+  },
+  "힙 성질": {
+    "term": "힙 성질",
+    "en": "heap property",
+    "def": "모든 노드가 자식보다 작거나 같다(최소 힙), 또는 크거나 같다(최대 힙)는 조건. 형제 사이에는 아무 순서도 요구하지 않는다. 이 느슨함이 삽입·삭제를 O(log n)에 끝내는 값이고, 동시에 힙으로 정렬된 순회를 얻을 수 없는 이유다.",
+    "chapter": "ii-8",
+    "aliases": [
+      "heap property",
+      "힙 불변식"
+    ]
+  },
+  "sift-up": {
+    "term": "sift-up",
+    "en": "sift-up / percolate-up",
+    "def": "배열 끝에 넣은 원소를 부모와 비교해 가며 위로 올려 힙 성질을 복구하는 연산. 부모 인덱스는 (i-1)/2 이므로 최대 log n 번 올라간다. 삽입의 뒷부분이 이것이다.",
+    "chapter": "ii-8",
+    "aliases": [
+      "percolate up",
+      "위로 올리기"
+    ]
+  },
+  "sift-down": {
+    "term": "sift-down",
+    "en": "sift-down / heapify-down",
+    "def": "루트에 놓인 원소를 두 자식 중 작은(최소 힙 기준) 쪽과 바꿔 가며 아래로 내려 힙 성질을 복구하는 연산. 자식 인덱스는 2i+1, 2i+2 다. 삭제의 뒷부분이고, 상향식 heapify 의 구성 요소이기도 하다.",
+    "chapter": "ii-8",
+    "aliases": [
+      "percolate down",
+      "아래로 내리기"
+    ]
+  },
+  "상향식 heapify": {
+    "term": "상향식 heapify",
+    "en": "bottom-up heapify",
+    "def": "임의의 배열을 힙으로 만드는 O(n) 절차. n/2-1 부터 0 까지 내려오며 각 노드에 sift-down 을 건다. 원소를 하나씩 push 하면 O(n log n) 인데 이쪽이 O(n) 인 이유는 노드 대부분이 바닥 근처에 있어 내려갈 거리가 거의 없기 때문이다.",
+    "chapter": "ii-8",
+    "aliases": [
+      "heapify",
+      "build-heap"
+    ]
+  },
+  "이진 탐색 트리": {
+    "term": "이진 탐색 트리",
+    "en": "binary search tree, BST",
+    "def": "모든 노드에 대해 왼쪽 서브트리의 값이 자신보다 작고 오른쪽이 크다는 조건을 지키는 이진 트리. 해시가 줄 수 없는 것을 준다 — 순서. 전임자·후임자·구간 질의·\"x 이상 가장 작은 키\"가 여기서 나온다.",
+    "chapter": "ii-9",
+    "aliases": [
+      "BST"
+    ]
+  },
+  "트리 회전": {
+    "term": "트리 회전",
+    "en": "tree rotation",
+    "def": "부모와 자식의 관계를 뒤집어 서브트리의 높이를 조정하는 국소 연산. 중위 순회 순서를 보존하기 때문에 탐색 트리의 성질을 깨지 않으면서 균형만 고칠 수 있다. 레드-블랙 트리와 AVL 트리가 균형을 유지하는 수단이다.",
+    "chapter": "ii-9",
+    "aliases": [
+      "rotation",
+      "회전"
+    ]
+  },
+  "레드-블랙 트리": {
+    "term": "레드-블랙 트리",
+    "en": "red-black tree",
+    "def": "각 노드에 색을 붙이고 다섯 가지 불변식으로 최악 높이를 2·log(n+1) 이하로 묶는 균형 이진 탐색 트리. std::map 과 std::set 의 내부다. 정렬된 입력이 들어와도 연결 리스트로 무너지지 않는 것이 이 구조의 값이다.",
+    "chapter": "ii-9",
+    "aliases": [
+      "red-black tree",
+      "RB 트리"
+    ]
+  },
+  "중위 순회": {
+    "term": "중위 순회",
+    "en": "in-order traversal",
+    "def": "왼쪽 서브트리 → 자신 → 오른쪽 서브트리 순으로 도는 순회. 이진 탐색 트리에서 돌리면 정렬된 순서가 나온다. 이것이 BST 가 순서를 유지한다는 주장의 증명이다.",
+    "chapter": "ii-10",
+    "aliases": [
+      "in-order",
+      "inorder"
+    ]
+  },
+  "후위 순회": {
+    "term": "후위 순회",
+    "en": "post-order traversal",
+    "def": "두 자식을 모두 돈 뒤에 자신을 처리하는 순회. \"자식의 결과가 있어야 내 결과가 나오는\" 모든 계산이 이 순서를 요구한다. 서브트리 크기, 디렉터리 용량, 트리 해제, 트리 DP 가 전부 후위다.",
+    "chapter": "ii-10",
+    "aliases": [
+      "post-order",
+      "postorder"
+    ]
+  },
+  "레벨 순회": {
+    "term": "레벨 순회",
+    "en": "level-order traversal",
+    "def": "깊이가 얕은 노드부터 차례로 도는 순회. 재귀의 스택을 큐로 바꾸면 그대로 얻어진다. 트리 위의 BFS 와 같은 것이며, 그래서 그래프의 BFS 로 이어진다.",
+    "chapter": "ii-10",
+    "aliases": [
+      "level-order",
+      "BFS 순회"
+    ]
+  },
+  "기저 조건": {
+    "term": "기저 조건",
+    "en": "base case",
+    "def": "재귀 함수가 더 이상 자신을 부르지 않고 답을 직접 돌려주는 가장 작은 경우. 재귀가 \"이미 동작한다\"고 가정할 수 있게 만드는 근거이자, 모든 호출 경로가 결국 도달해야 하는 종점이다. 빠지면 무한 재귀가 된다.",
+    "chapter": "iii-1",
+    "aliases": [
+      "base case",
+      "종료 조건"
+    ]
+  },
+  "신뢰의 도약": {
+    "term": "신뢰의 도약",
+    "en": "leap of faith",
+    "def": "재귀 호출이 이미 올바르게 동작한다고 믿고 한 단계만 짜는 사고법. 호출 안으로 따라 들어가 추적하지 않는다. 기저 조건이 참이고 한 단계가 문제를 진짜로 줄이면 그 믿음은 귀납으로 정당화된다.",
+    "chapter": "iii-1",
+    "aliases": [
+      "leap of faith"
+    ]
+  },
+  "재귀 깊이 한도": {
+    "term": "재귀 깊이 한도",
+    "en": "recursion limit",
+    "def": "재귀 호출이 쌓을 수 있는 스택 프레임의 상한. CPython 은 기본 1000 이고 넘으면 RecursionError 를 던진다. C++ 은 별도 한도 없이 스택이 고갈될 때까지 가므로 오히려 조용히 죽는다. 깊이는 시간이 아니라 메모리 비용이다.",
+    "chapter": "iii-1",
+    "aliases": [
+      "recursion limit",
+      "setrecursionlimit"
+    ]
+  },
+  "부분집합": {
+    "term": "부분집합",
+    "en": "subset, power set",
+    "def": "원소마다 넣거나 빼는 두 갈래 선택을 독립으로 하면 나오는 집합. n 개 원소의 부분집합은 2^n 개이고, 이 지수가 곧 제약조건 n ≤ 20 근처라는 신호가 된다.",
+    "chapter": "iii-2",
+    "aliases": [
+      "멱집합",
+      "power set"
+    ]
+  },
+  "사전순 생성": {
+    "term": "사전순 생성",
+    "en": "lexicographic generation",
+    "def": "순열·조합을 사전 순서로 하나씩 만들어 내는 방식. next_permutation 이 이 규칙을 따르고, 뒤에서부터 증가 지점을 찾아 뒤집는 절차로 다음 것을 O(n) 에 얻는다. 전부 만들어 정렬하지 않아도 되는 이유다.",
+    "chapter": "iii-2",
+    "aliases": [
+      "next_permutation",
+      "lexicographic order"
+    ]
+  },
+  "비트마스크": {
+    "term": "비트마스크",
+    "en": "bitmask",
+    "def": "집합 하나를 정수 하나로 접는 표현. i 번째 비트가 1 이면 원소 i 가 들어 있다는 뜻이다. 합집합·교집합·차집합이 OR·AND·AND NOT 한 번으로 끝나고, 집합 자체를 배열 인덱스로 쓸 수 있어 비트마스크 DP 의 상태가 된다.",
+    "chapter": "iii-3",
+    "aliases": [
+      "bitmask",
+      "비트 집합"
+    ]
+  },
+  "최하위 비트": {
+    "term": "최하위 비트",
+    "en": "lowest set bit",
+    "def": "켜져 있는 비트 중 가장 낮은 자리. x & -x 로 뽑아낸다. 2의 보수 표현에서 -x 는 x 를 뒤집고 1 을 더한 값이라 그 자리만 살아남기 때문이다. 켜진 비트를 하나씩 훑는 순회와 펜윅 트리의 인덱스 이동이 이것을 쓴다.",
+    "chapter": "iii-3",
+    "aliases": [
+      "lowest set bit",
+      "LSB",
+      "x & -x"
+    ]
+  },
+  "부분집합 열거": {
+    "term": "부분집합 열거",
+    "en": "submask enumeration",
+    "def": "마스크 m 의 모든 부분집합을 도는 관용구 `for (s = m; s; s = (s-1) & m)`. s-1 이 s 의 최하위 켜진 비트를 끄고 그 아래를 전부 켜며, & m 이 m 밖의 비트를 걷어낸다. 전체 비용은 3^n 이다.",
+    "chapter": "iii-3",
+    "aliases": [
+      "submask enumeration",
+      "부분마스크 열거"
+    ]
   }
 }

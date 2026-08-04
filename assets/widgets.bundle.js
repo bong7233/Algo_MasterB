@@ -1091,7 +1091,7 @@ window.Widgets = window.Widgets || {};
       ctx.font = font;
       var lines = wrapLines(ctx, msg, L.w - 16, 2);
       for (var i = 0; i < lines.length; i++) {
-        text(ctx, lines[i], 8, L.headerH - 30 + i * 14, font, warn ? T.boxWarn : T.fgDim);
+        text(ctx, lines[i], 8, L.headerH - 21 + i * 14, font, warn ? T.boxWarn : T.fgDim);
       }
     }
 
@@ -1157,17 +1157,17 @@ window.Widgets = window.Widgets || {};
           ctx.strokeStyle = T.boxDanger;
           ctx.lineWidth = 1.6;
           ctx.beginPath();
-          for (var q = -1; q <= 1; q += 2) {
-            var cx0 = mx + ux * q * 2, cy0 = my + uy * q * 2;
-            ctx.moveTo(cx0 - px * sl - ux * sl * 0.5, cy0 - py * sl - uy * sl * 0.5);
-            ctx.lineTo(cx0 + px * sl + ux * sl * 0.5, cy0 + py * sl + uy * sl * 0.5);
-          }
+          // 빗금 하나면 충분하다. 두 줄로 그으면 형제 간선이 여럿 잘릴 때
+          // 화면이 붉은 낙서가 되어 정작 노드가 안 보인다.
+          ctx.moveTo(mx - px * sl - ux * sl * 0.5, my - py * sl - uy * sl * 0.5);
+          ctx.lineTo(mx + px * sl + ux * sl * 0.5, my + py * sl + uy * sl * 0.5);
           ctx.stroke();
         }
       }
       ctx.lineWidth = 1;
 
       // ② 유령 삼각형 — 잘려서 펼치지 않은 부분트리
+      var labelRight = -1e9;   // 잎 개수 라벨이 서로 겹치면 둘 다 못 읽는다
       if (L.r >= 2) {
         for (var g = 0; g <= shown; g++) {
           var cn = nodes[g];
@@ -1187,9 +1187,15 @@ window.Widgets = window.Widgets || {};
           ctx.setLineDash([3, 3]);
           ctx.stroke();
           ctx.setLineDash([]);
-          if (half >= 13) {
-            ctx.globalAlpha = 0.8;
-            text(ctx, '×' + comma(cn.skip), cn.x, bottomY + 1, '9px ' + FONT, T.fgFaint, 'center');
+          if (half >= 11) {
+            var lab2 = '×' + comma(cn.skip);
+            ctx.font = '9px ' + FONT;
+            var lw = ctx.measureText(lab2).width;
+            if (cn.x - lw / 2 > labelRight + 4) {
+              ctx.globalAlpha = 0.85;
+              text(ctx, lab2, cn.x, bottomY + 1, '9px ' + FONT, T.fgFaint, 'center');
+              labelRight = cn.x + lw / 2;
+            }
           }
         }
       }
