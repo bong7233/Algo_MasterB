@@ -238,9 +238,28 @@ def stamp_versions() -> str:
 # 빌드
 # --------------------------------------------------------------------------
 
+_doc_index: dict[str, list[Path]] | None = None
+
+
+def refresh_doc_index() -> None:
+    """content/ 를 한 번만 훑어 <id> → 파일 목록 색인을 만든다.
+
+    왜 캐시하는가: 챕터가 147개다. 챕터마다 rglob 을 돌면 트리를 147번 훑는다.
+    --watch 는 매 재빌드마다 무효화한다(새 파일이 생겨야 잡힌다).
+    """
+    global _doc_index
+    idx: dict[str, list[Path]] = {}
+    if CONTENT.exists():
+        for p in CONTENT.rglob("*.md"):
+            idx.setdefault(p.stem, []).append(p)
+    _doc_index = idx
+
+
 def find_doc(chapter_id: str) -> Path | None:
     """content/ 어디에 있든 <id>.md 를 찾는다 (CLAUDE.md §2-1)."""
-    hits = list(CONTENT.rglob(f"{chapter_id}.md"))
+    if _doc_index is None:
+        refresh_doc_index()
+    hits = sorted(_doc_index.get(chapter_id, []))  # type: ignore[union-attr]
     if len(hits) > 1:
         raise SystemExit(f"[에러] '{chapter_id}.md' 가 여러 곳에 있습니다: {hits}")
     return hits[0] if hits else None
@@ -260,6 +279,7 @@ def load_toc() -> dict:
 
 def build() -> dict:
     toc = load_toc()
+    refresh_doc_index()
 
     docs: dict[str, str] = {}
     classify: list[dict] = []
@@ -286,9 +306,12 @@ def build() -> dict:
             classify.extend(collect_classify(cid, ch["num"], ch["title"], md))
 
     # 목차에 없는 고아 마크다운 경고
-    for p in sorted(CONTENT.rglob("*.md")):
-        if p.stem not in seen and not p.name.startswith("_"):
-            print(f"[경고] 목차에 없는 파일: {p.relative_to(ROOT)}")
+    for stem, paths in sorted((_doc_index or {}).items()):
+        if stem in seen:
+            continue
+        for p in sorted(paths):
+            if not p.name.startswith("_"):
+                print(f"[경고] 목차에 없는 파일: {p.relative_to(ROOT)}")
 
     payload = {
         "meta": toc["meta"],

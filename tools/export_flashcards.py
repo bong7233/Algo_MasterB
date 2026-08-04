@@ -44,10 +44,21 @@ CODE_TITLE_RE = re.compile(r'^\s*`{3,}\s*\w+.*title\s*=\s*"([^"]+)"')
 HEADING_RE = re.compile(r"^#{2,4}\s+(.+?)\s*$")
 
 
+# $O(\log n)$ 같은 표기의 최소 정리. 앱과 같은 방침이다(CONTRACT §2.6) —
+# 수식 렌더링 엔진이 없으므로 원문을 살리되 역슬래시 명령만 읽을 수 있게 바꾼다.
+TEX = {
+    r"\log": "log", r"\ln": "ln", r"\lg": "lg", r"\max": "max", r"\min": "min",
+    r"\cdot": "·", r"\times": "×", r"\le": "≤", r"\ge": "≥", r"\neq": "≠",
+    r"\alpha": "α", r"\ldots": "…", r"\dots": "…", r"\,": " ", r"\;": " ",
+}
+
+
 def clean(text: str) -> str:
     """마크다운 장식을 걷어낸다. 카드 앞뒤에 `**` 가 그대로 보이면 산만하다."""
     t = text.strip()
     t = re.sub(r"\$\$?([^$]*)\$\$?", r"\1", t)  # 수식 구분자
+    for k, v in TEX.items():
+        t = t.replace(k, v)
     t = re.sub(r"`([^`]*)`", r"\1", t)
     t = re.sub(r"\*\*([^*]*)\*\*", r"\1", t)
     t = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", r"\1", t)
@@ -110,8 +121,10 @@ def deck_complexity(chapters: list[tuple[str, str, str, str]]) -> list[list[str]
                     break
                 body.append(nxt.strip())
 
+            # 80줄까지 거슬러 본다. `::: dual` 의 코드가 길어서 40줄로는
+            # title= 에 닿지 못하고 챕터 제목으로 밀려나는 일이 실제로 있었다.
             subject = ""
-            for back in range(i - 1, max(i - 40, -1), -1):
+            for back in range(i - 1, max(i - 80, -1), -1):
                 cm = CODE_TITLE_RE.match(lines[back])
                 if cm:
                     subject = cm.group(1)

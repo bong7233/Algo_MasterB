@@ -752,10 +752,23 @@
     if (lastFocus && lastFocus.focus) lastFocus.focus();
   }
 
+  // 모달이 열린 동안 탭 이동이 뒤 본문으로 빠져나가면, 화면에는 모달이 떠 있는데
+  // 포커스는 안 보이는 곳에 있게 된다. 키보드 사용자에게는 길을 잃는 상황이다.
+  function trapTab(e) {
+    var modal = $$('.modal').filter(function (m) { return !m.hidden; })[0];
+    if (!modal) return;
+    var items = $$('a[href], button, input, [tabindex]:not([tabindex="-1"])', modal)
+      .filter(function (el) { return el.offsetParent !== null; });
+    if (!items.length) return;
+    var first = items[0], last = items[items.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  }
+
   function setDrawer(open) {
-    document.body.classList.toggle('drawer-open', open);
-    var ov = $('#overlay');
-    if (ov) ov.hidden = !open;
+    // 스타일시트가 기다리는 훅은 body.nav-open 이다. 오버레이의 페이드는
+    // 거기서 파생되므로 여기서 hidden 을 건드리면 전환이 죽는다.
+    document.body.classList.toggle('nav-open', open);
     var b = $('#btn-menu');
     if (b) b.setAttribute('aria-expanded', open ? 'true' : 'false');
   }
@@ -840,6 +853,7 @@
       var typing = tag === 'input' || tag === 'textarea' || e.target.isContentEditable;
 
       if (e.key === 'Escape') { closeModals(); setDrawer(false); return; }
+      if (e.key === 'Tab' && document.body.classList.contains('modal-open')) { trapTab(e); return; }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault(); openModal('#search-modal'); return;
       }
