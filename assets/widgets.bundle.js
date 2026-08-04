@@ -343,6 +343,1191 @@ window.Widgets = window.Widgets || {};
   };
 })();
 
+/* ==== backtracking-tree.js ==== */
+/* backtracking-tree.js — 재귀 호출 트리가 뻗고, 가지치기로 잘려 나간다
+ *
+ * 이 위젯이 증명하려는 명제는 하나다: **백트래킹의 이득은 "더 좋은 답"이 아니라
+ * "같은 답을 훨씬 적게 펼쳐서" 다.** 그래서 화면의 주인공은 트리 그림이 아니라
+ * 그 위에 붙은 두 개의 카운터다 — 가지치기 ON 과 OFF 의 방문 노드 수.
+ * 4-퀸에서 341 이 17 로 줄고, 8-퀸에서 1,900만이 2,057 로 줄어든다.
+ * 그 숫자가 III-4 의 논지 전부이고, 산문으로는 이 대비가 만들어지지 않는다.
+ *
+ * 왜 잘린 가지 아래에 "유령 삼각형"을 그리는가
+ *   가지치기를 색칠로만 표시하면 화면에서 사라진 것은 아무것도 없다 —
+ *   원래 거기 매달려 있었을 부분트리를 독자가 상상해야 한다. 상상을 시키면
+ *   위젯이 하는 일이 없다. 잘린 노드마다 점선 삼각형과 "×16" 같은 잎 개수를
+ *   남겨서, **버린 것의 크기**를 눈에 보이게 한다. III-4 가 "잘려 나간 자리에
+ *   원래 무엇이 매달려 있었는지"를 요구하는 지점이다.
+ *
+ * 왜 스텝 = 노드 방문 1회 인가
+ *   그렇게 두면 스텝 인덱스가 곧 "지금까지 만든 노드 수"가 되어 카운터와
+ *   재생 위치가 같은 수를 가리킨다. 되돌아 나오는 것(undo)은 스텝을 소비하지
+ *   않는다 — 화면에서 새로 생기는 것이 없기 때문이다. 대신 지금 노드에서
+ *   뿌리까지의 경로를 액센트로 칠해 **재귀 스택**을 항상 보이게 한다.
+ *
+ * 왜 색·모양을 둘 다 쓰는가
+ *   방문=원, 가지치기=×가 그어진 사각형, 해=금색 마름모. 색을 구분하지 못해도
+ *   모양으로 갈린다(계약 §5). 트리가 300 노드를 넘어가면 글자가 죽으므로
+ *   모양이 유일한 단서가 되는 구간이 실제로 생긴다.
+ */
+(function () {
+  'use strict';
+
+  var K = window.WidgetKit;
+  if (!K) return;
+
+  var FONT = '-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif';
+
+  /* 그리는 노드 수 상한. 폭이 좁을수록 잎 간격이 무너지므로 단계로 낮춘다.
+   * 상한을 넘으면 **DFS 앞부분만** 남는다 — 실제 탐색이 방문하는 순서 그대로라
+   * 재생 서사가 깨지지 않는다. 잘라냈다는 사실은 제목에 적는다(계약 §7,
+   * dp-table 이 이미 밟은 선례). 조용히 자르면 위젯이 거짓말을 한다. */
+  var TIERS = [[900, 400], [560, 360], [0, 180]];
+
+  // 전수 열거를 실제로 돌려 볼 상한. 8-퀸의 가지치기 없는 트리는 1,900만 노드라
+  // 브라우저에서 돌릴 수 없다. 그 위는 닫힌 식으로 계산하고 "계산값"이라고 밝힌다.
+  var ENUM_BUDGET = 1200000;
+
+  var MAX_TREE_H = 430;
+  /* 현재 상태 패널(퀸 판 등). 트리에서 폭을 떼어 오는 값비싼 장치라
+   * ① 폭이 700 이상이고 ② 잎이 200개 이하일 때만 켠다. 잎이 그보다 많으면
+   * 노드가 이미 점 크기라 트리에 폭을 다 주는 편이 낫다. */
+  var SIDE_MIN = 700;
+  var SIDE_MAX_LEAVES = 200;
+  var COMPACT = 620;         // 이 폭 아래에서는 카운터를 한 줄짜리로 접는다
+
+  // ─── 잡동사니 ────────────────────────────────────────────────────────────
+
+  function clampInt(v, lo, hi, dflt) {
+    var n = (typeof v === 'number') ? v : parseInt(v, 10);
+    if (!isFinite(n)) return dflt;
+    n = Math.round(n);
+    return n < lo ? lo : (n > hi ? hi : n);
+  }
+
+  function oneOf(v, list, dflt) {
+    for (var i = 0; i < list.length; i++) if (v === list[i]) return v;
+    return dflt;
+  }
+
+  function comma(n) {
+    if (!isFinite(n)) return '?';
+    var s = String(Math.round(n)), out = '', c = 0;
+    for (var i = s.length - 1; i >= 0; i--) {
+      out = s.charAt(i) + out;
+      if (++c % 3 === 0 && i > 0 && s.charAt(i - 1) !== '-') out = ',' + out;
+    }
+    return out;
+  }
+
+  function isArr(v) { return Object.prototype.toString.call(v) === '[object Array]'; }
+
+  // 등비수열 합 1 + B + B^2 + ... + B^D. 가지치기 없는 트리의 노드 수다.
+  function geom(B, D) {
+    var s = 0, p = 1;
+    for (var d = 0; d <= D; d++) { s += p; p *= B; }
+    return s;
+  }
+
+  // ─── 문제 정의 ───────────────────────────────────────────────────────────
+  //
+  // spec 은 "선택 트리" 하나를 기술한다. 탐색 드라이버(search)는 문제를 모른다.
+  //   D          깊이 (선택을 몇 번 하면 잎인가)
+  //   B          분기 수 (후보 개수). 가지치기 없는 트리의 크기를 여기서 역산한다
+  //   reject(d,c)  가지치기 근거 문자열 또는 null. **필요조건만 검사한다** —
+  //                여기서 자른 가지 아래에 해가 있으면 위젯이 답을 잃는다
+  //   accept()     잎에서의 최종 판정. reject 와 독립적으로 전체를 다시 검사한다.
+  //                그래야 가지치기를 꺼도 같은 해집합이 나오는 것이 **검증**된다
+  //
+  // 본문 ::: dual 의 코드와 같은 알고리즘이어야 한다(계약 §9). 특히 퀸의
+  // 충돌 검사는 "열 같음 + 행차 == 열차" 두 줄 그대로다.
+
+  function nqueensSpec(n) {
+    var col = new Int32Array(n);
+    return {
+      key: 'nqueens', D: n, B: n, n: n,
+      levelLabel: function (d) { return d === 0 ? '빈 판' : '행 ' + (d - 1); },
+      rootText: '·',
+      rootSay: '빈 판에서 시작한다. 행 0 부터 열을 하나씩 시도한다. 한 행에 퀸은 정확히 하나다.',
+      nodeText: function (d, c) { return String(c); },
+      candidates: function () {
+        var a = [];
+        for (var c = 0; c < n; c++) a.push(c);
+        return a;
+      },
+      // 이미 놓인 퀸 중 첫 번째 충돌을 돌려준다. 어느 퀸과 왜 부딪히는지까지
+      // 남겨야 상태 줄이 "열 3 이 이미 쓰였다" 처럼 근거를 말할 수 있다.
+      reject: function (d, c) {
+        for (var i = 0; i < d; i++) {
+          if (col[i] === c) return { why: '열 ' + c + ' 이 이미 쓰였다', row: i };
+          if (Math.abs(col[i] - c) === d - i) {
+            return { why: '(행 ' + i + ', 열 ' + col[i] + ') 과 대각선으로 마주 본다', row: i };
+          }
+        }
+        return null;
+      },
+      apply: function (d, c) { col[d] = c; },
+      undo: function () { },
+      accept: function () {
+        for (var r = 1; r < n; r++) {
+          for (var i = 0; i < r; i++) {
+            if (col[i] === col[r] || Math.abs(col[i] - col[r]) === r - i) return false;
+          }
+        }
+        return true;
+      },
+      solKey: function () {
+        var a = [];
+        for (var i = 0; i < n; i++) a.push(col[i]);
+        return a.join('-');
+      },
+      sayOk: function (d, c) {
+        return '(행 ' + d + ', 열 ' + c + ') 배치. 충돌 없다.' +
+               (d + 1 < n ? ' 행 ' + (d + 1) + ' 로 내려간다.' : '');
+      },
+      sayCut: function (d, c, r) {
+        return '(행 ' + d + ', 열 ' + c + ') 배치 시도 → ' + r.why + '. 가지치기.';
+      },
+      sayFail: function (d, c) {
+        // 가지치기를 끈 경우에만 온다: 잎까지 다 가서야 틀린 것을 안다.
+        var r = null;
+        for (var rr = 1; rr < n && !r; rr++) {
+          for (var i = 0; i < rr; i++) {
+            if (col[i] === col[rr]) { r = '(행 ' + i + ', 열 ' + col[i] + ') 과 같은 열'; break; }
+            if (Math.abs(col[i] - col[rr]) === rr - i) {
+              r = '(행 ' + i + ', 열 ' + col[i] + ') 과 대각선'; break;
+            }
+          }
+        }
+        return '(행 ' + d + ', 열 ' + c + ') 배치. 판이 다 찼다 — 검사하니 ' +
+               (r || '충돌') + ' 이다. 버린다.';
+      },
+      state: function () { return col; }
+    };
+  }
+
+  function subsetSpec(items, target) {
+    var n = items.length, pick = new Int32Array(n), sum = 0;
+    return {
+      key: 'subset', D: n, B: 2, items: items, target: target,
+      levelLabel: function (d) { return d === 0 ? '시작' : '물건 ' + (d - 1); },
+      rootText: '0',
+      rootSay: '빈 부분집합에서 시작한다. 합 0. 물건마다 넣을지 말지를 고른다. 목표는 ' + target + '.',
+      nodeText: function (d, c) { return c ? '+' + items[d] : '−'; },
+      candidates: function () { return [1, 0]; },   // 넣는 쪽을 먼저 — 초과가 빨리 드러난다
+      reject: function (d, c) {
+        if (!c) return null;                        // 건너뛰는 선택은 합을 늘리지 않는다
+        if (sum + items[d] > target) {
+          return { why: '합 ' + (sum + items[d]) + ' 이 목표 ' + target + ' 을 넘는다', row: d };
+        }
+        return null;
+      },
+      apply: function (d, c) { pick[d] = c; if (c) sum += items[d]; },
+      undo: function (d, c) { if (c) sum -= items[d]; pick[d] = 0; },
+      accept: function () {
+        var s = 0;
+        for (var i = 0; i < n; i++) if (pick[i]) s += items[i];
+        return s === target;
+      },
+      solKey: function () {
+        var a = [];
+        for (var i = 0; i < n; i++) if (pick[i]) a.push(items[i]);
+        return '{' + a.join(',') + '}';
+      },
+      sayOk: function (d, c) {
+        var s = c ? ('물건 ' + d + '(무게 ' + items[d] + ') 을 넣는다 → 합 ' + (sum + items[d]))
+                  : ('물건 ' + d + '(무게 ' + items[d] + ') 을 건너뛴다 → 합 ' + sum);
+        return s + '. 목표 ' + target + ' 이하다.' + (d + 1 < n ? ' 물건 ' + (d + 1) + ' 로 넘어간다.' : '');
+      },
+      sayCut: function (d, c, r) {
+        return '물건 ' + d + '(무게 ' + items[d] + ') 을 넣어 보면 → ' + r.why + '. 가지치기.';
+      },
+      sayFail: function (d, c) {
+        var s = 0;
+        for (var i = 0; i < n; i++) if (pick[i]) s += items[i];
+        return '물건 ' + d + ' 까지 다 골랐다. 합 ' + s + ' ≠ 목표 ' + target + '. 버린다.';
+      },
+      state: function () { return pick; },
+      sumNow: function () { return sum; }
+    };
+  }
+
+  function permutationSpec(n) {
+    var a = new Int32Array(n), used = new Int32Array(n), at = new Int32Array(n);
+    return {
+      key: 'permutation', D: n, B: n, n: n,
+      levelLabel: function (d) { return d === 0 ? '시작' : '자리 ' + (d - 1); },
+      rootText: '·',
+      rootSay: '빈 수열에서 시작한다. 자리 0 부터 값 0..' + (n - 1) + ' 를 하나씩 시도한다.',
+      nodeText: function (d, c) { return String(c); },
+      candidates: function () {
+        var l = [];
+        for (var c = 0; c < n; c++) l.push(c);
+        return l;
+      },
+      reject: function (d, c) {
+        if (used[c]) return { why: '값 ' + c + ' 는 자리 ' + at[c] + ' 에서 이미 썼다', row: at[c] };
+        return null;
+      },
+      apply: function (d, c) { a[d] = c; used[c] = 1; at[c] = d; },
+      undo: function (d, c) { used[c] = 0; },
+      accept: function () {
+        var seen = {};
+        for (var i = 0; i < n; i++) {
+          if (seen[a[i]]) return false;
+          seen[a[i]] = 1;
+        }
+        return true;
+      },
+      solKey: function () {
+        var o = [];
+        for (var i = 0; i < n; i++) o.push(a[i]);
+        return o.join('-');
+      },
+      sayOk: function (d, c) {
+        return '자리 ' + d + ' 에 값 ' + c + '. 아직 안 쓴 값이다.' +
+               (d + 1 < n ? ' 자리 ' + (d + 1) + ' 로 넘어간다.' : '');
+      },
+      sayCut: function (d, c, r) {
+        return '자리 ' + d + ' 에 값 ' + c + ' 시도 → ' + r.why + '. 가지치기.';
+      },
+      sayFail: function (d, c) {
+        return '자리 ' + d + ' 까지 다 채웠다 — 값이 겹친다. 순열이 아니다. 버린다.';
+      },
+      state: function () { return a; }
+    };
+  }
+
+  // ─── 탐색 드라이버 ───────────────────────────────────────────────────────
+
+  /* 노드 하나 = 상태 하나. 루트는 "아무것도 고르지 않은 상태"다.
+   *   kind 'ok'   들어가서 더 펼친 노드 (= 방문)
+   *        'cut'  가지치기로 잘린 노드. 만들기는 하되 펼치지 않는다
+   *        'sol'  잎 + 해
+   *        'fail' 잎인데 틀림 (가지치기를 껐을 때만 나온다)
+   *        'base' 하노이의 기저 호출
+   *
+   * 방문 수의 정의: **cut 이 아닌 노드의 수**(루트 포함). 4-퀸 가지치기 ON 이
+   * 17, OFF 가 341 이 되는 그 정의이고 III-4 본문의 숫자와 같다.
+   *
+   * enumerate=false 면 drawCap 에서 재귀를 통째로 멈춘다. 8-퀸의 가지치기 없는
+   * 트리(1,900만 노드)를 브라우저가 다 돌 수 없기 때문이다. 그때 총계는
+   * 닫힌 식으로 채우고 화면에 "계산값"이라고 밝힌다.
+   */
+  function search(spec, prune, drawCap, enumerate) {
+    var D = spec.D;
+    var nodes = [], solKeys = [];
+    var visited = 0, pruned = 0, truncated = false, stopped = false;
+
+    function add(parent, depth, kind, text, say, cv, wrow, skip) {
+      if (nodes.length >= drawCap) { truncated = true; return -1; }
+      var nd = {
+        p: parent, d: depth, kind: kind, txt: text, say: say,
+        cv: cv, wrow: (wrow == null ? -1 : wrow), skip: skip || 0,
+        kids: [], slot: 0, x: 0, y: 0
+      };
+      nodes.push(nd);
+      if (parent >= 0) nodes[parent].kids.push(nodes.length - 1);
+      return nodes.length - 1;
+    }
+
+    function leavesUnder(depth) { return Math.pow(spec.B, D - depth); }
+
+    function rec(id, d) {
+      if (stopped) return;
+      if (d === D) {
+        var ok = spec.accept();
+        if (ok) {
+          solKeys.push(spec.solKey());
+          if (id >= 0) { nodes[id].kind = 'sol'; nodes[id].say += ' 해 ' + solKeys[solKeys.length - 1] + ' 를 찾았다.'; }
+        } else if (id >= 0) {
+          nodes[id].kind = 'fail';
+        }
+        return;
+      }
+      var cands = spec.candidates(d);
+      for (var i = 0; i < cands.length; i++) {
+        if (stopped) return;
+        var c = cands[i];
+        var r = prune ? spec.reject(d, c) : null;
+        if (r) {
+          pruned++;
+          add(id, d + 1, 'cut',
+              spec.nodeText(d, c),
+              spec.sayCut(d, c, r) + ' 이 아래 ' + comma(leavesUnder(d + 1)) + '개 잎을 통째로 버린다.',
+              c, r.row, leavesUnder(d + 1));
+          if (!enumerate && truncated) { stopped = true; return; }
+          continue;
+        }
+        visited++;
+        var say = (d + 1 === D) ? null : spec.sayOk(d, c);
+        var nid = add(id, d + 1, 'ok', spec.nodeText(d, c), say, c, -1, 0);
+        if (!enumerate && truncated) { stopped = true; return; }
+        spec.apply(d, c);
+        // 잎의 문장은 상태를 적용한 뒤에 만들어야 "무엇과 충돌했는지"를 말할 수 있다.
+        if (nid >= 0 && d + 1 === D) {
+          nodes[nid].say = spec.accept() ? spec.sayOk(d, c) : spec.sayFail(d, c);
+        }
+        rec(nid, d + 1);
+        spec.undo(d, c);
+      }
+    }
+
+    visited++;
+    var root = add(-1, 0, 'ok', spec.rootText, spec.rootSay, -1, -1, 0);
+    rec(root, 0);
+
+    return {
+      nodes: nodes, solKeys: solKeys,
+      visited: visited, pruned: pruned, sols: solKeys.length,
+      truncated: truncated, exact: !stopped
+    };
+  }
+
+  // ─── 하노이 호출 트리 ────────────────────────────────────────────────────
+  //
+  // 하노이는 "탐색"이 아니라 **호출 트리**다. 자를 가지가 없다 — 모든 호출이
+  // 실제로 필요한 일을 한다. III-1 이 이 위젯에 요구하는 것은 가지치기가 아니라
+  // "한 노드에서 보이는 것은 자기 자신과 자식 둘뿐" 이라는 그림이다.
+
+  function hanoiModel(n, drawCap) {
+    var nodes = [], calls = 0, bases = 0, moves = 0, truncated = false;
+    var PEG = ['A', 'B', 'C'];
+
+    function add(parent, depth, kind, text, say, cv) {
+      if (nodes.length >= drawCap) { truncated = true; return -1; }
+      nodes.push({
+        p: parent, d: depth, kind: kind, txt: text, say: say, cv: cv,
+        wrow: -1, skip: 0, kids: [], slot: 0, x: 0, y: 0
+      });
+      if (parent >= 0) nodes[parent].kids.push(nodes.length - 1);
+      return nodes.length - 1;
+    }
+
+    function rec(parent, depth, k, from, to, via) {
+      var tag = 'h' + k;
+      var arrow = PEG[from] + '→' + PEG[to];
+      calls++;
+      if (k === 0) {
+        bases++;
+        var bid = add(parent, depth, 'base', '0',
+          'hanoi(0, ' + arrow + ') — 기저 조건. 원반이 없으니 아무 일도 하지 않고 그대로 돌아간다. ' +
+          '여기가 재귀가 멈추는 자리다.', k);
+        return bid;
+      }
+      moves++;
+      var id = add(parent, depth, 'ok', tag,
+        'hanoi(' + k + ', ' + arrow + ') 호출. 맨 아래 원반 ' + k + ' 를 ' + PEG[to] + ' 로 보내려면 ' +
+        '위 ' + (k - 1) + '개가 먼저 ' + PEG[via] + ' 로 비켜나야 한다 — 그것이 왼쪽 자식이다. ' +
+        '비켜났다고 믿고 원반 ' + k + ' 를 옮긴 뒤, 오른쪽 자식이 그 ' + (k - 1) + '개를 ' + PEG[to] + ' 로 옮긴다.', k);
+      rec(id, depth + 1, k - 1, from, via, to);
+      rec(id, depth + 1, k - 1, via, to, from);
+      return id;
+    }
+
+    rec(-1, 0, n, 0, 2, 1);
+    return {
+      nodes: nodes, solKeys: [], visited: calls, pruned: 0, sols: bases,
+      moves: moves, truncated: truncated, exact: true
+    };
+  }
+
+  // ─── 배치 ────────────────────────────────────────────────────────────────
+
+  /* 잎을 균등 간격으로 늘어놓고 부모를 **자기 부분트리의 잎 구간 한가운데**에 둔다.
+   * 자식들의 평균이 아니라 잎 구간의 중앙인 이유: 자식마다 부분트리 크기가
+   * 다르면 평균은 큰 쪽으로 끌려가서 트리가 통째로 기울어 보인다. 잎 구간의
+   * 중앙을 쓰면 층마다 좌우 대칭이 살아나 "같은 규칙이 반복된다"가 눈에 들어온다.
+   * 가지치기된 노드도 잎으로 자리를 차지한다 — 자리를 안 주면 잘린 가지가
+   * 화면에서 사라져 버려서, 정작 이 위젯이 보여야 할 "버린 것"이 안 보인다. */
+  function assignSlots(nodes) {
+    if (!nodes.length) return 0;
+    var slot = 0;
+    // 재귀 대신 후위 순회를 스택으로 돈다. 노드가 400개까지 가는데
+    // 호출 스택 한도에 기대고 싶지 않다.
+    var stack = [[0, 0]];
+    while (stack.length) {
+      var top = stack[stack.length - 1];
+      var nd = nodes[top[0]];
+      if (top[1] === 0) nd.lo = slot;            // 부분트리가 차지하기 시작하는 잎 자리
+      if (top[1] < nd.kids.length) {
+        top[1] += 1;
+        stack.push([nd.kids[top[1] - 1], 0]);
+      } else {
+        if (!nd.kids.length) slot += 1;
+        nd.hi = slot;
+        nd.slot = (nd.lo + nd.hi) / 2;
+        stack.pop();
+      }
+    }
+    return slot;
+  }
+
+  // ─── 위젯 ────────────────────────────────────────────────────────────────
+
+  K.register('backtracking-tree', function (host, opts) {
+    if (!opts || typeof opts !== 'object') opts = {};
+
+    // ---- opts 검증. 본문 저자가 손으로 쓴 JSON 이라 신뢰하지 않는다(계약 §1) ----
+    var problem = oneOf(opts.problem, ['nqueens', 'subset', 'permutation', 'hanoi'], 'nqueens');
+    var prunable = problem !== 'hanoi';
+    var prune = prunable ? (opts.prune !== false) : false;
+
+    var n;
+    if (problem === 'nqueens') n = clampInt(opts.n, 4, 8, 5);
+    else if (problem === 'permutation') n = clampInt(opts.n, 2, 6, 4);
+    else n = clampInt(opts.n, 1, 6, 3);            // hanoi
+
+    var items = [];
+    if (isArr(opts.items)) {
+      for (var ii = 0; ii < opts.items.length && items.length < 8; ii++) {
+        var w = clampInt(opts.items[ii], 1, 99, 0);
+        if (w > 0) items.push(w);
+      }
+    }
+    if (items.length < 2) items = [3, 34, 4, 12, 5, 2];
+    var target = clampInt(opts.target, 1, 999, 9);
+
+    var caption = (typeof opts.caption === 'string' && opts.caption.length)
+      ? opts.caption.slice(0, 120) : '';
+
+    function makeSpec() {
+      if (problem === 'subset') return subsetSpec(items, target);
+      if (problem === 'permutation') return permutationSpec(n);
+      return nqueensSpec(n);
+    }
+
+    var B = problem === 'subset' ? 2 : n;
+    var D = problem === 'subset' ? items.length : n;
+
+    // ---- 모델 ----
+    var cap = 400;
+    var model = null;
+    var layout = null;
+    var cur = 0;
+    var player = null;
+
+    /* 한 번의 rebuild 가 두 번 탐색한다: 지금 모드(그리기 + 세기)와 반대 모드(세기만).
+     * 두 수를 나란히 놓는 것이 이 위젯의 결론이므로, 반대편 숫자는 항상 있어야 한다. */
+    function rebuild() {
+      var m;
+      if (problem === 'hanoi') {
+        m = hanoiModel(n, cap);
+        m.other = null;
+        m.same = null;
+      } else {
+        var spec = makeSpec();
+        var estCur = prune ? 0 : geom(B, D);
+        m = search(spec, prune, cap, !(estCur > ENUM_BUDGET));
+        if (!m.exact) {
+          // 전수 열거를 포기했다. 노드 수는 닫힌 식으로 정확히 계산되고,
+          // 해의 개수는 반대편(가지치기 ON) 이 알려 준다.
+          m.visited = geom(B, D);
+          m.pruned = 0;
+        }
+        var spec2 = makeSpec();
+        var estOther = prune ? geom(B, D) : 0;
+        var o = search(spec2, !prune, 0, !(estOther > ENUM_BUDGET));
+        if (!o.exact) { o.visited = geom(B, D); o.pruned = 0; }
+        m.other = o;
+
+        // 가지치기는 비용을 바꾸지 exact 답을 바꾸지 않는다 — 그 명제를 위젯이 직접 검사한다.
+        if (m.exact && o.exact) {
+          m.same = m.solKeys.join('|') === o.solKeys.join('|');
+          m.solList = m.solKeys;
+        } else {
+          m.same = null;
+          m.solList = m.exact ? m.solKeys : o.solKeys;
+          if (!m.exact) m.sols = o.sols;
+          if (!o.exact) o.sols = m.sols;
+        }
+      }
+      m.leaves = assignSlots(m.nodes);
+      m.maxDepth = 0;
+      // 누적 카운터. render 에서 매번 세면 재생이 느려진다(계약 §7).
+      var nn = m.nodes.length;
+      m.cVis = new Int32Array(nn + 1);
+      m.cCut = new Int32Array(nn + 1);
+      m.cSol = new Int32Array(nn + 1);
+      for (var i = 0; i < nn; i++) {
+        var nd = m.nodes[i];
+        if (nd.d > m.maxDepth) m.maxDepth = nd.d;
+        m.cVis[i + 1] = m.cVis[i] + (nd.kind === 'cut' ? 0 : 1);
+        m.cCut[i + 1] = m.cCut[i] + (nd.kind === 'cut' ? 1 : 0);
+        m.cSol[i + 1] = m.cSol[i] + (nd.kind === 'sol' ? 1 : 0);
+      }
+      m.total = m.visited + m.pruned;
+      model = m;
+      layout = null;
+    }
+    rebuild();
+
+    // ---- 껍데기 ----
+    var defTitle = {
+      nqueens: n + '-퀸 탐색 트리',
+      subset: '부분집합 합 = ' + target + ' 탐색 트리',
+      permutation: n + '개 순열 생성 트리',
+      hanoi: 'hanoi(' + n + ') 호출 트리'
+    }[problem];
+
+    var ui = K.frame(host, { title: caption || defTitle, wide: true });
+    var titleEl = ui.head.querySelector('.wk-title');
+    var baseTitle = caption || defTitle;
+
+    function syncTitle() {
+      if (!titleEl) return;
+      var s = baseTitle;
+      if (model.truncated) {
+        s += '  · 앞 ' + comma(model.nodes.length) + '개 노드까지만 그린다 (전체 ' +
+             comma(model.total) + '개)';
+      }
+      if (titleEl.textContent !== s) titleEl.textContent = s;
+    }
+
+    if (prunable) {
+      K.seg(ui.slot, [
+        { label: '가지치기 ON', value: 'on' },
+        { label: 'OFF', value: 'off' }
+      ], prune ? 'on' : 'off', function (v) {
+        prune = (v === 'on');
+        rebuild();
+        // 모드를 바꾸면 트리 모양 자체가 달라진다. 처음부터 다시 보는 것이 맞다.
+        player.stop();
+        player.goto(0);
+        syncTitle();
+      });
+    } else {
+      var note = K.el('span', null, '가지치기 없음 — 모든 호출이 필요한 일을 한다');
+      note.style.fontSize = '.74rem';
+      note.style.color = 'var(--fg-faint)';
+      ui.slot.appendChild(note);
+    }
+
+    var legend = K.el('div', 'wk-legend');
+    var LEG = problem === 'hanoi'
+      ? [['--w-visited', '호출 (원)'], ['--w-path', '기저 조건 h0 (마름모) — 여기서 멈춘다'],
+         ['--accent', '지금 호출 + 그 위 호출들 = 재귀 스택']]
+      : [['--w-visited', '방문 (원)'], ['--box-danger', '가지치기 (× 사각형) — 펼치지 않는다'],
+         ['--w-wall', '잎까지 가서 실패 (흐린 사각형)'], ['--w-path', '해 (마름모)'],
+         ['--accent', '지금 노드 + 뿌리까지의 경로 = 재귀 스택']];
+    LEG.forEach(function (p) {
+      var s = K.el('span'), i = K.el('i');
+      i.style.background = 'var(' + p[0] + ')';
+      s.appendChild(i);
+      s.appendChild(document.createTextNode(p[1]));
+      legend.appendChild(s);
+    });
+    if (prunable) {
+      legend.appendChild(K.el('span', null, '· 점선 삼각형 = 잘려서 펼치지 않은 부분트리 (안의 수는 그 아래 잎 개수)'));
+    }
+    ui.root.insertBefore(legend, ui.ctl);
+
+    // ---- 배치 계산 ----
+    function capFor(w) {
+      for (var i = 0; i < TIERS.length; i++) if (w >= TIERS[i][0]) return TIERS[i][1];
+      return TIERS[TIERS.length - 1][1];
+    }
+
+    function computeLayout(w) {
+      var compact = w < COMPACT;
+      var side = (w >= SIDE_MIN && model.leaves <= SIDE_MAX_LEAVES) ? (w >= 860 ? 180 : 150) : 0;
+      var gut = (w >= 520) ? 46 : 14;              // 깊이 라벨 자리
+      // 카운터 패널 + 논지 두 줄. 논지가 잘리면 이 위젯의 결론이 사라진다.
+      var headerH = compact ? (26 * 2 + 4 + 44) : (62 + 44);
+      var levels = model.maxDepth + 1;
+      var levelH = Math.floor(MAX_TREE_H / Math.max(1, levels));
+      if (levelH > 58) levelH = 58;
+      if (levelH < 22) levelH = 22;
+      var treeTop = headerH + 10;
+      var treeW = Math.max(60, w - gut - 8 - (side ? side + 12 : 0));
+      var slotW = treeW / Math.max(1, model.leaves);
+      var r = Math.min(levelH * 0.30, slotW * 0.42, 13);
+      if (r < 1.2) r = 1.2;
+      var treeH = (levels - 1) * levelH + r * 2 + 26;
+      return {
+        w: w, compact: compact, side: side, gut: gut,
+        headerH: headerH, levelH: levelH, treeTop: treeTop, treeW: treeW,
+        slotW: slotW, r: r, levels: levels,
+        height: Math.min(700, treeTop + treeH + 6)
+      };
+    }
+
+    function layoutFor(w) {
+      if (!layout || layout.w !== w) {
+        layout = computeLayout(w);
+        // 노드 좌표는 배치가 바뀔 때만 다시 잡는다. render 안에서 만들지 않는다.
+        for (var i = 0; i < model.nodes.length; i++) {
+          var nd = model.nodes[i];
+          nd.x = layout.gut + (nd.slot / Math.max(1, model.leaves)) * layout.treeW;
+          nd.y = layout.treeTop + 12 + nd.d * layout.levelH;
+        }
+      }
+      return layout;
+    }
+
+    // ---- 그리기 보조 ----
+    function text(ctx, s, x, y, font, color, align) {
+      ctx.font = font;
+      ctx.fillStyle = color;
+      ctx.textAlign = align || 'left';
+      ctx.fillText(s, x, y);
+      ctx.textAlign = 'left';
+    }
+
+    /* 논지 한 줄이 좁은 폭에서 캔버스 밖으로 새어 나가면 결론이 잘린다.
+     * 어절 단위로 접어서 최대 두 줄까지 쓰고, 그래도 넘치면 말줄임한다. */
+    function wrapLines(ctx, s, maxW, maxLines) {
+      var words = s.split(' '), lines = [], line = '', i = 0;
+      for (; i < words.length; i++) {
+        var t = line ? line + ' ' + words[i] : words[i];
+        if (line && ctx.measureText(t).width > maxW) {
+          lines.push(line);
+          line = words[i];
+          if (lines.length >= maxLines - 1) { i++; break; }
+        } else line = t;
+      }
+      // 남은 어절이 있으면 마지막 줄에 몰아넣고 폭에 맞춰 자른다.
+      var rest = line;
+      if (i < words.length) rest = line + ' ' + words.slice(i).join(' ');
+      var cut = false;
+      while (rest.length > 1 && ctx.measureText(rest + (cut ? '…' : '')).width > maxW) {
+        rest = rest.slice(0, -1);
+        cut = true;
+      }
+      lines.push(cut ? rest + '…' : rest);
+      return lines;
+    }
+
+    /* 카운터 패널. grid-search 가 패널마다 "확장 칸 수"를 크게 띄우는 것과 같은 장치다 —
+     * 이 위젯의 결론도 그림이 아니라 숫자이기 때문이다. */
+    function statPanel(ctx, T, x, y, w, h, title, stats, active, compact) {
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = T.bgElev;
+      ctx.fillRect(x, y, w, h);
+      ctx.strokeStyle = active ? T.accent : T.border;
+      ctx.lineWidth = active ? 2 : 1;
+      ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+
+      if (compact) {
+        text(ctx, title, x + 8, y + h / 2 + 4, '700 11px ' + FONT, active ? T.accent : T.fgDim);
+        var tx = x + 8 + ctx.measureText(title).width + 10;
+        for (var i = 0; i < stats.length; i++) {
+          var s = stats[i][1] + ' ' + stats[i][0];
+          text(ctx, s, tx, y + h / 2 + 4, (i === 0 ? '700 ' : '') + '11px ' + FONT,
+               i === 0 ? T.fg : T.fgDim);
+          tx += ctx.measureText(s).width + 10;
+        }
+        return;
+      }
+
+      text(ctx, title, x + 9, y + 16, '700 11px ' + FONT, active ? T.accent : T.fgDim);
+      if (active) text(ctx, '← 지금 보는 트리', x + w - 9, y + 16, '10px ' + FONT, T.fgFaint, 'right');
+      var colW = (w - 18) / stats.length;
+      for (var k = 0; k < stats.length; k++) {
+        var cx = x + 9 + colW * k;
+        text(ctx, stats[k][1], cx, y + 44, '700 19px ' + FONT, k === 0 ? T.fg : T.fgDim);
+        text(ctx, stats[k][0], cx, y + 57, '10px ' + FONT, T.fgFaint);
+      }
+    }
+
+    function drawHeader(ctx, T, L) {
+      var w = L.w, pad = 8;
+      var vis = model.cVis[Math.min(cur, model.nodes.length)];
+      var cut = model.cCut[Math.min(cur, model.nodes.length)];
+      var sol = model.cSol[Math.min(cur, model.nodes.length)];
+      var done = cur >= model.nodes.length && !model.truncated;
+
+      if (problem === 'hanoi') {
+        var hw = Math.min(360, w - pad * 2);
+        statPanel(ctx, T, pad, 6, hw, 62, '호출 트리 (가지치기 없음)', [
+          ['호출', comma(vis)], ['기저 h0', comma(sol)], ['옮긴 원반', comma(model.moves)]
+        ], true, L.compact);
+        thesis(ctx, T, L, '호출 ' + comma(model.visited) + '개 = 2^' + (n + 1) + ' − 1. ' +
+               '원반이 하나 늘 때마다 호출이 두 배가 된다 — 원반 20개면 100만 번이다. ' +
+               '자를 가지는 없다. 모든 호출이 필요한 일을 한다.', false);
+        return;
+      }
+
+      var me = { v: model.visited, c: model.pruned, s: model.sols };
+      var ot = { v: model.other.visited, c: model.other.pruned, s: model.other.sols };
+      var on = prune ? me : ot, off = prune ? ot : me;
+
+      var pw, ph = L.compact ? 26 : 62, gapY = L.compact ? 4 : 0;
+      var x2, y2;
+      if (L.compact) {
+        pw = w - pad * 2;
+        x2 = pad; y2 = 6 + ph + gapY;
+      } else {
+        pw = Math.min(300, Math.floor((w - pad * 2 - 12 - (L.side ? L.side + 12 : 0)) / 2));
+        if (pw < 150) pw = Math.floor((w - pad * 2 - 12) / 2);
+        x2 = pad + pw + 12; y2 = 6;
+      }
+
+      // 지금 보는 쪽만 "지금까지" 값을 키우고, 반대쪽은 최종값을 보여 준다.
+      // 두 수를 같은 눈금에 두면 재생 도중에도 격차가 계속 읽힌다.
+      var onStats = prune
+        ? [['방문', comma(vis) + (done ? '' : ' / ' + comma(on.v))], ['잘림', comma(cut)], ['해', comma(sol)]]
+        : [['방문', comma(on.v)], ['잘림', comma(on.c)], ['해', comma(on.s)]];
+      var offStats = !prune
+        ? [['방문', comma(vis) + (done ? '' : ' / ' + comma(off.v))], ['잘림', comma(cut)], ['해', comma(sol)]]
+        : [['방문', comma(off.v)], ['잘림', comma(off.c)], ['해', comma(off.s)]];
+
+      statPanel(ctx, T, pad, 6, pw, ph, '가지치기 ON', onStats, prune, L.compact);
+      statPanel(ctx, T, x2, y2, pw, ph, '가지치기 OFF (전수 조사)', offStats, !prune, L.compact);
+
+      // 논지 한 줄. 이 위젯이 존재하는 이유가 이 문장이다.
+      var ratio = on.v > 0 ? (off.v / on.v) : 0;
+      var msg = '가지치기가 방문 노드를 ' + comma(off.v) + ' → ' + comma(on.v) + ' 로 줄인다 (' +
+                (ratio >= 100 ? comma(Math.round(ratio)) : (Math.round(ratio * 10) / 10)) + '배).';
+      var warn = false;
+      if (model.same === true) msg += ' 두 쪽이 찾은 해는 ' + comma(on.s) + '개로 같다 — 답은 그대로다.';
+      else if (model.same === false) { msg += ' 해집합이 다르다 — 가지치기가 답을 잃었다.'; warn = true; }
+      else msg += ' 해 ' + comma(on.s) + '개. OFF 쪽 노드 수는 전수 열거 대신 계산값이다.';
+      thesis(ctx, T, L, msg, warn);
+    }
+
+    function thesis(ctx, T, L, msg, warn) {
+      var font = (warn ? '700 ' : '') + '11px ' + FONT;
+      ctx.font = font;
+      var lines = wrapLines(ctx, msg, L.w - 16, 2);
+      for (var i = 0; i < lines.length; i++) {
+        text(ctx, lines[i], 8, L.headerH - 30 + i * 14, font, warn ? T.boxWarn : T.fgDim);
+      }
+    }
+
+    // 지금 노드에서 뿌리까지 (재귀 스택)
+    var stackMark = [];
+    function markStack(idx) {
+      stackMark.length = 0;
+      var guard = 64, i = idx;
+      while (i >= 0 && guard-- > 0) { stackMark.push(i); i = model.nodes[i].p; }
+    }
+
+    function drawTree(ctx, T, L) {
+      var nodes = model.nodes;
+      var shown = Math.min(cur, nodes.length - 1);
+      if (cur >= nodes.length) shown = nodes.length - 1;
+      var active = cur < nodes.length ? cur : -1;
+      markStack(active);
+      var onStack = {};
+      for (var s = 0; s < stackMark.length; s++) onStack[stackMark[s]] = 1;
+
+      var bottomY = L.treeTop + 12 + (L.levels - 1) * L.levelH;
+
+      // 깊이 라벨
+      if (L.gut > 20) {
+        for (var d = 0; d < L.levels; d++) {
+          var lab = (problem === 'hanoi')
+            ? (d === 0 ? '호출' : '깊이 ' + d)
+            : (problem === 'nqueens' ? (d === 0 ? '빈 판' : '행 ' + (d - 1))
+              : problem === 'subset' ? (d === 0 ? '시작' : '물건 ' + (d - 1))
+              : (d === 0 ? '시작' : '자리 ' + (d - 1)));
+          ctx.globalAlpha = 0.75;
+          text(ctx, lab, 4, L.treeTop + 16 + d * L.levelH, '10px ' + FONT, T.fgFaint);
+          ctx.globalAlpha = 1;
+        }
+      }
+
+      // ① 간선
+      ctx.lineWidth = 1;
+      for (var i = 1; i <= shown; i++) {
+        var nd = nodes[i];
+        if (nd.p < 0 || nd.p > shown) continue;
+        var pa = nodes[nd.p];
+        var stacked = onStack[i] && onStack[nd.p];
+        ctx.globalAlpha = nd.kind === 'cut' ? 0.55 : (stacked ? 1 : 0.5);
+        ctx.strokeStyle = stacked ? T.accent : (nd.kind === 'cut' ? T.boxDanger : T.border);
+        ctx.lineWidth = stacked ? 2 : 1;
+        ctx.beginPath();
+        ctx.moveTo(pa.x, pa.y + L.r);
+        ctx.lineTo(nd.x, nd.y - L.r);
+        ctx.stroke();
+
+        /* 잘린 가지는 간선 위에 이발소 표시(빗금 두 줄)를 얹는다.
+         * 노드 안에 × 를 그리면 "몇 번 후보였는지" 숫자와 겹쳐 둘 다 죽는다.
+         * 자르는 행위는 간선에서 일어나므로 표시도 간선에 두는 것이 맞다. */
+        if (nd.kind === 'cut' && L.r >= 4) {
+          var mx = (pa.x + nd.x) / 2, my = (pa.y + nd.y) / 2;
+          var vx = nd.x - pa.x, vy = nd.y - pa.y;
+          var len = Math.sqrt(vx * vx + vy * vy) || 1;
+          var ux = vx / len, uy = vy / len;
+          var px = -uy, py = ux;                    // 간선에 수직인 방향
+          var sl = Math.min(5, L.r * 0.9);
+          ctx.globalAlpha = 1;
+          ctx.strokeStyle = T.boxDanger;
+          ctx.lineWidth = 1.6;
+          ctx.beginPath();
+          for (var q = -1; q <= 1; q += 2) {
+            var cx0 = mx + ux * q * 2, cy0 = my + uy * q * 2;
+            ctx.moveTo(cx0 - px * sl - ux * sl * 0.5, cy0 - py * sl - uy * sl * 0.5);
+            ctx.lineTo(cx0 + px * sl + ux * sl * 0.5, cy0 + py * sl + uy * sl * 0.5);
+          }
+          ctx.stroke();
+        }
+      }
+      ctx.lineWidth = 1;
+
+      // ② 유령 삼각형 — 잘려서 펼치지 않은 부분트리
+      if (L.r >= 2) {
+        for (var g = 0; g <= shown; g++) {
+          var cn = nodes[g];
+          if (cn.kind !== 'cut' || cn.skip < 2 || cn.d >= L.levels - 1) continue;
+          var half = Math.min(L.slotW * 1.7, (L.levels - 1 - cn.d) * L.levelH * 0.34);
+          if (half < 2) continue;
+          ctx.globalAlpha = 0.12;
+          ctx.fillStyle = T.fgFaint;
+          ctx.beginPath();
+          ctx.moveTo(cn.x, cn.y + L.r);
+          ctx.lineTo(cn.x - half, bottomY + 4);
+          ctx.lineTo(cn.x + half, bottomY + 4);
+          ctx.closePath();
+          ctx.fill();
+          ctx.globalAlpha = 0.42;
+          ctx.strokeStyle = T.fgFaint;
+          ctx.setLineDash([3, 3]);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          if (half >= 13) {
+            ctx.globalAlpha = 0.8;
+            text(ctx, '×' + comma(cn.skip), cn.x, bottomY + 1, '9px ' + FONT, T.fgFaint, 'center');
+          }
+        }
+      }
+      ctx.globalAlpha = 1;
+
+      // ③ 노드
+      for (var k = 0; k <= shown; k++) drawNode(ctx, T, L, nodes[k], k === active, !!onStack[k]);
+
+      // 잘려서 못 그린 부분을 밑줄로 알린다. 제목에도 적지만, 그림 안에서도
+      // "여기서 끊겼다"가 보여야 트리 모양을 오해하지 않는다.
+      if (model.truncated && cur >= nodes.length - 1) {
+        ctx.globalAlpha = 0.9;
+        text(ctx, '⋯ 여기까지만 그렸다. 전체 ' + comma(model.total) + '개 노드 중 ' +
+                  comma(nodes.length) + '개.',
+             L.gut, bottomY + 20, '10px ' + FONT, T.fgFaint);
+        ctx.globalAlpha = 1;
+      }
+    }
+
+    function drawNode(ctx, T, L, nd, isCur, stacked) {
+      var r = L.r, x = nd.x, y = nd.y;
+      ctx.globalAlpha = 1;
+
+      if (nd.kind === 'cut') {
+        // 잘린 노드: 사각형(원과 모양으로 갈린다, 계약 §5). × 는 간선 위에 있다.
+        ctx.fillStyle = T.boxDanger;
+        ctx.globalAlpha = 0.92;
+        ctx.fillRect(x - r, y - r, r * 2, r * 2);
+        ctx.globalAlpha = 1;
+        if (r < 4) {
+          // 너무 작아 간선 표시가 안 보이는 크기에서는 노드에 직접 × 를 긋는다.
+          ctx.strokeStyle = T.bg;
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(x - r, y - r); ctx.lineTo(x + r, y + r);
+          ctx.moveTo(x + r, y - r); ctx.lineTo(x - r, y + r);
+          ctx.stroke();
+        }
+      } else if (nd.kind === 'fail') {
+        ctx.globalAlpha = 0.85;
+        ctx.fillStyle = T.wWall;
+        ctx.fillRect(x - r * 0.85, y - r * 0.85, r * 1.7, r * 1.7);
+        ctx.globalAlpha = 1;
+      } else if (nd.kind === 'sol' || nd.kind === 'base') {
+        // 마름모 = 확정. 금색은 "확정" 전용이라 여기서만 쓴다.
+        ctx.fillStyle = T.wPath;
+        ctx.beginPath();
+        ctx.moveTo(x, y - r * 1.25); ctx.lineTo(x + r * 1.25, y);
+        ctx.lineTo(x, y + r * 1.25); ctx.lineTo(x - r * 1.25, y);
+        ctx.closePath();
+        ctx.fill();
+      } else {
+        ctx.fillStyle = T.wVisited;
+        ctx.globalAlpha = 0.92;
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, 6.2832);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = T.border;
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, 6.2832);
+        ctx.stroke();
+      }
+
+      if (stacked || isCur) {
+        ctx.strokeStyle = T.accent;
+        ctx.lineWidth = isCur ? 2.5 : 1.5;
+        ctx.beginPath();
+        ctx.arc(x, y, r + (isCur ? 3.5 : 2), 0, 6.2832);
+        ctx.stroke();
+        ctx.lineWidth = 1;
+      }
+
+      // 글자는 자리가 있을 때만. 뭉개진 글자는 없는 것만 못하다.
+      if (r >= 7 && nd.txt) {
+        var fs = Math.min(Math.round(r * 1.15), 13);
+        var col = (nd.kind === 'sol' || nd.kind === 'base') ? T.bg
+                : (nd.kind === 'cut' ? T.bg : T.fg);
+        ctx.font = '700 ' + fs + 'px ' + FONT;
+        if (ctx.measureText(nd.txt).width <= r * 2.1) {
+          text(ctx, nd.txt, x, y + fs * 0.36, '700 ' + fs + 'px ' + FONT, col, 'center');
+        }
+      }
+    }
+
+    // ---- 현재 상태 패널 ----
+    //
+    // 트리만 있으면 "이 노드가 무슨 상태인가"를 독자가 머리로 복원해야 한다.
+    // 퀸은 판을, 부분집합은 고른 물건과 합을, 순열은 자리를 그대로 보여 준다.
+
+    function pathOf(idx) {
+      var p = [], guard = 64, i = idx;
+      while (i > 0 && guard-- > 0) { p.push(model.nodes[i]); i = model.nodes[i].p; }
+      p.reverse();
+      return p;
+    }
+
+    function drawSide(ctx, T, L) {
+      var x = L.w - L.side - 4, y = L.treeTop, w = L.side, h = L.height - L.treeTop - 8;
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = T.bgElev;
+      ctx.fillRect(x, y, w, h);
+      ctx.strokeStyle = T.border;
+      ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+
+      var idx = cur < model.nodes.length ? cur : model.nodes.length - 1;
+      var nd = model.nodes[idx];
+      var path = pathOf(idx);
+      text(ctx, cur < model.nodes.length ? '지금 상태' : '탐색 종료', x + 8, y + 16,
+           '700 11px ' + FONT, T.fgDim);
+
+      if (problem === 'nqueens') drawBoard(ctx, T, x, y, w, nd, path);
+      else if (problem === 'subset') drawItems(ctx, T, x, y, w, nd, path);
+      else if (problem === 'permutation') drawSlots(ctx, T, x, y, w, nd, path);
+      else drawCalls(ctx, T, x, y, w, nd, path);
+    }
+
+    function drawBoard(ctx, T, x, y, w, nd, path) {
+      var cell = Math.min(20, Math.floor((w - 24) / n));
+      var bx = x + Math.floor((w - cell * n) / 2), by = y + 26;
+      var cols = [], cutRow = -1, cutCol = -1;
+      for (var i = 0; i < path.length; i++) {
+        if (path[i].kind === 'cut') { cutRow = path[i].d - 1; cutCol = path[i].cv; }
+        else cols.push(path[i].cv);
+      }
+      // 탐색이 끝난 뒤에는 첫 번째 해를 보여 준다 — 결국 무엇을 찾았는지가 남아야 한다.
+      var showSol = (cur >= model.nodes.length && model.solList && model.solList.length);
+      if (showSol) {
+        cols = model.solList[0].split('-');
+        for (var q = 0; q < cols.length; q++) cols[q] = parseInt(cols[q], 10);
+        cutRow = -1;
+      }
+
+      for (var r = 0; r < n; r++) {
+        for (var c = 0; c < n; c++) {
+          ctx.fillStyle = ((r + c) % 2) ? T.bgCode : T.bg;
+          ctx.fillRect(bx + c * cell, by + r * cell, cell, cell);
+        }
+      }
+      // 놓인 퀸
+      for (var rr = 0; rr < cols.length && rr < n; rr++) {
+        var qx = bx + cols[rr] * cell, qy = by + rr * cell;
+        ctx.fillStyle = showSol ? T.wPath : T.wVisited;
+        ctx.fillRect(qx + 1, qy + 1, cell - 2, cell - 2);
+        if (cell >= 12) {
+          text(ctx, 'Q', qx + cell / 2, qy + cell * 0.72, '700 ' + Math.round(cell * 0.62) + 'px ' + FONT, T.bg, 'center');
+        }
+      }
+      // 시도했다가 잘린 칸 + 부딪힌 퀸
+      if (cutRow >= 0) {
+        ctx.fillStyle = T.boxDanger;
+        ctx.fillRect(bx + cutCol * cell + 1, by + cutRow * cell + 1, cell - 2, cell - 2);
+        if (cell >= 12) {
+          text(ctx, '×', bx + cutCol * cell + cell / 2, by + cutRow * cell + cell * 0.74,
+               '700 ' + Math.round(cell * 0.7) + 'px ' + FONT, T.bg, 'center');
+        }
+        if (nd.wrow >= 0 && nd.wrow < cols.length) {
+          ctx.strokeStyle = T.boxWarn;
+          ctx.lineWidth = 2;
+          ctx.strokeRect(bx + cols[nd.wrow] * cell + 1, by + nd.wrow * cell + 1, cell - 2, cell - 2);
+          ctx.lineWidth = 1;
+        }
+      }
+      ctx.strokeStyle = T.border;
+      ctx.strokeRect(bx + 0.5, by + 0.5, cell * n - 1, cell * n - 1);
+
+      var ty = by + cell * n + 16;
+      text(ctx, showSol ? ('해 ' + model.solList[0]) : ('놓은 퀸 ' + cols.length + '개'),
+           x + 8, ty, '11px ' + FONT, showSol ? T.wPath : T.fgDim);
+      if (cutRow >= 0) {
+        text(ctx, '× 행 ' + cutRow + ' 열 ' + cutCol + ' 은 못 놓는다', x + 8, ty + 15, '11px ' + FONT, T.boxDanger);
+      }
+    }
+
+    function drawItems(ctx, T, x, y, w, nd, path) {
+      var sum = 0, ty = y + 30;
+      for (var i = 0; i < items.length; i++) {
+        var st = 0;   // 0 미정 1 넣음 2 건너뜀 3 잘림
+        if (i < path.length) {
+          var p = path[i];
+          st = (p.kind === 'cut') ? 3 : (p.cv ? 1 : 2);
+          if (p.cv && p.kind !== 'cut') sum += items[i];
+        }
+        var bx = x + 10, bw = w - 20, bh = 15;
+        ctx.fillStyle = st === 1 ? T.wVisited : (st === 3 ? T.boxDanger : T.bg);
+        ctx.globalAlpha = st === 2 ? 0.35 : 1;
+        ctx.fillRect(bx, ty - 11, bw, bh);
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = T.border;
+        ctx.strokeRect(bx + 0.5, ty - 10.5, bw - 1, bh - 1);
+        text(ctx, '물건 ' + i + ' · 무게 ' + items[i], bx + 5, ty,
+             '10px ' + FONT, (st === 1 || st === 3) ? T.bg : T.fgDim);
+        text(ctx, st === 1 ? '넣음' : (st === 2 ? '건너뜀' : (st === 3 ? '초과 ×' : '—')),
+             bx + bw - 5, ty, '10px ' + FONT, (st === 1 || st === 3) ? T.bg : T.fgFaint, 'right');
+        ty += bh + 3;
+      }
+      text(ctx, '합 ' + sum + ' / 목표 ' + target, x + 10, ty + 12, '700 12px ' + FONT,
+           sum === target ? T.wPath : T.fgDim);
+      // 목표 대비 막대. 넘치면 붉게 — 가지치기의 근거가 그림으로도 읽힌다.
+      var bw2 = w - 20, ratio = Math.min(1, sum / target);
+      ctx.fillStyle = T.bgCode;
+      ctx.fillRect(x + 10, ty + 18, bw2, 6);
+      ctx.fillStyle = sum > target ? T.boxDanger : (sum === target ? T.wPath : T.wVisited);
+      ctx.fillRect(x + 10, ty + 18, Math.max(1, bw2 * ratio), 6);
+    }
+
+    function drawSlots(ctx, T, x, y, w, nd, path) {
+      var cell = Math.min(26, Math.floor((w - 24) / n));
+      var bx = x + 10, by = y + 34;
+      for (var i = 0; i < n; i++) {
+        var v = null, cut = false;
+        if (i < path.length) { v = path[i].cv; cut = path[i].kind === 'cut'; }
+        ctx.fillStyle = v == null ? T.bg : (cut ? T.boxDanger : T.wVisited);
+        ctx.fillRect(bx + i * cell, by, cell - 2, cell - 2);
+        ctx.strokeStyle = T.border;
+        ctx.strokeRect(bx + i * cell + 0.5, by + 0.5, cell - 3, cell - 3);
+        if (v != null) {
+          text(ctx, String(v), bx + i * cell + (cell - 2) / 2, by + cell * 0.68,
+               '700 ' + Math.round(cell * 0.5) + 'px ' + FONT, T.bg, 'center');
+        }
+        text(ctx, String(i), bx + i * cell + (cell - 2) / 2, by + cell + 12,
+             '9px ' + FONT, T.fgFaint, 'center');
+      }
+      text(ctx, '자리 ↑ / 값 ↓', x + 10, by + cell + 30, '10px ' + FONT, T.fgFaint);
+    }
+
+    function drawCalls(ctx, T, x, y, w, nd, path) {
+      var ty = y + 32;
+      text(ctx, 'hanoi(' + n + ', A→C)', x + 10, ty, '11px ' + FONT, T.fgDim);
+      for (var i = 0; i < path.length && i < 8; i++) {
+        ty += 16;
+        var p = path[i];
+        text(ctx, '└ ' + (p.kind === 'base' ? 'hanoi(0)' : 'hanoi(' + p.cv + ')'),
+             x + 10 + (i + 1) * 8, ty, '11px ' + FONT,
+             p.kind === 'base' ? T.wPath : (i === path.length - 1 ? T.accent : T.fgFaint));
+      }
+      ty += 24;
+      text(ctx, '지금 스택 깊이 ' + path.length, x + 10, ty, '11px ' + FONT, T.fgDim);
+      text(ctx, '한 노드에서 보이는 것은', x + 10, ty + 18, '10px ' + FONT, T.fgFaint);
+      text(ctx, '자기 자신과 자식 둘뿐이다.', x + 10, ty + 31, '10px ' + FONT, T.fgFaint);
+    }
+
+    // ---- 캔버스 ----
+    function draw(ctx, size, T) {
+      var L = layoutFor(size.w);
+      ctx.textBaseline = 'alphabetic';
+      drawHeader(ctx, T, L);
+      drawTree(ctx, T, L);
+      if (L.side) drawSide(ctx, T, L);
+      ctx.globalAlpha = 1;
+    }
+
+    var canvas = K.canvas(ui.stage, {
+      height: function (w) { return layoutFor(w).height; },
+      draw: draw
+    });
+
+    // ---- 상태 줄 ----
+    function solText() {
+      var list = model.solList || [];
+      if (!list.length) return '해가 없다.';
+      var head = list.slice(0, 10).join(', ');
+      return '해 ' + comma(model.sols) + '개: ' + head + (list.length > 10 ? ' 외 ' + (list.length - 10) + '개' : '') + '.';
+    }
+
+    function label(i) {
+      var nodes = model.nodes;
+      if (i < nodes.length) {
+        var nd = nodes[i];
+        var vis = model.cVis[i + 1], cutn = model.cCut[i + 1], sol = model.cSol[i + 1];
+        var s = nd.say || '';
+        if (problem === 'hanoi') {
+          return s + '  ▸ 지금까지 호출 ' + comma(vis) + '개, 기저 ' + comma(sol) + '개.';
+        }
+        return s + '  ▸ 지금까지 방문 ' + comma(vis) + '개, 잘림 ' + comma(cutn) +
+               '개, 해 ' + comma(sol) + '개. (가지치기 ' + (prune ? 'ON' : 'OFF') + ')';
+      }
+      // 마지막 스텝 — 결론. 두 모드의 총계를 한 문장에 나란히 둔다.
+      if (problem === 'hanoi') {
+        return '탐색 종료. hanoi(' + n + ') 는 호출 ' + comma(model.visited) + '개, 그중 기저 h0 가 ' +
+               comma(model.sols) + '개, 실제로 옮긴 원반이 ' + comma(model.moves) + '개다. ' +
+               '호출 수는 2^' + (n + 1) + ' − 1 이고 원반이 하나 늘 때마다 두 배가 된다.';
+      }
+      var me = { v: model.visited, c: model.pruned, s: model.sols };
+      var ot = { v: model.other.visited, c: model.other.pruned, s: model.other.sols };
+      var on = prune ? me : ot, off = prune ? ot : me;
+      var ratio = on.v > 0 ? Math.round((off.v / on.v) * 10) / 10 : 0;
+      var s2 = '탐색 종료. 가지치기 ON — 방문 ' + comma(on.v) + '개, 잘림 ' + comma(on.c) +
+               '개, 해 ' + comma(on.s) + '개. 가지치기 OFF — 방문 ' + comma(off.v) +
+               '개, 잘림 ' + comma(off.c) + '개, 해 ' + comma(off.s) + '개. ' +
+               'ON 이 ' + (ratio >= 100 ? comma(Math.round(ratio)) : ratio) + '배 적게 펼친다. ';
+      if (model.same === true) s2 += '두 쪽이 찾은 해는 같다. ';
+      else if (model.same === false) s2 += '해집합이 다르다 — 가지치기가 답을 잃었다. ';
+      else s2 += 'OFF 쪽은 전수 열거 대신 계산값이다. ';
+      s2 += solText();
+      if (model.truncated) {
+        s2 += ' (그림은 앞 ' + comma(model.nodes.length) + '개 노드까지만이다.)';
+      }
+      return s2;
+    }
+
+    // ---- 재생기 ----
+    player = K.player(ui, {
+      total: function () { return model.nodes.length + 1; },
+      render: function (i) { cur = i; canvas.redraw(); },
+      label: label
+    });
+
+    /* 폭이 바뀌면 그릴 수 있는 노드 수 자체가 달라진다(TIERS). 캔버스의
+     * ResizeObserver 는 다시 그리기만 하므로, 모델을 다시 만들 관측자를 따로 둔다.
+     * 같은 폭에서는 절대 다시 만들지 않는다 — 되감기가 흔들리면 안 된다(계약 §7). */
+    function syncCap() {
+      var w = ui.stage.clientWidth || 320;
+      var want = capFor(w);
+      if (want === cap) return;
+      cap = want;
+      rebuild();
+      syncTitle();
+      player.goto(Math.min(cur, model.nodes.length));
+    }
+
+    if (typeof ResizeObserver === 'function') {
+      var pending = false;
+      new ResizeObserver(function () {
+        if (pending) return;
+        pending = true;
+        requestAnimationFrame(function () { pending = false; syncCap(); });
+      }).observe(ui.stage);
+    } else {
+      window.addEventListener('resize', syncCap);
+    }
+
+    syncCap();
+    syncTitle();
+    player.goto(0);
+  });
+})();
+
 /* ==== complexity-plot.js ==== */
 /* complexity-plot — N 이 커질 때 복잡도 곡선이 벌어지는 것과 "1초 안에 되는 선"
  *
@@ -4638,6 +5823,1118 @@ window.Widgets = window.Widgets || {};
       layout: function () { return L(); },
       nodeXY: function (k) { return nodeXY(L(), k); },
       cellXY: function (k) { return cellXY(L(), k); }
+    };
+  });
+})();
+
+/* ==== tree-traversal.js ==== */
+/* tree-traversal.js — 전위 · 중위 · 후위 · 레벨 순회와 호출 스택
+ *
+ * 이 위젯이 가르치려는 단 하나:
+ *   **네 순회는 다른 알고리즘이 아니다. 같은 재귀에서 "자기를 출력하는 줄"이
+ *   어디에 놓였느냐의 차이일 뿐이다.**
+ * 그 차이는 트리 그림만으로는 절대 보이지 않는다. 보이는 곳은 호출 스택이다.
+ * 그래서 트리와 스택을 나란히 놓고 같은 노드를 양쪽에서 동시에 강조한다.
+ * 프레임 안의 [1] [2] [3] 표식은 본문 II-10 §2 의 세 시점 표기와 같은 것이다.
+ *
+ *   visit(u):
+ *       [1] 여기 → 전위      (들어가면서)
+ *       visit(u.left)
+ *       [2] 여기 → 중위      (왼쪽을 끝내고)
+ *       visit(u.right)
+ *       [3] 여기 → 후위      (자식을 다 끝내고)
+ *
+ * 레벨 순회만 계보가 다르다. 스택이 아니라 큐를 쓴다 — 그래서 이 순회에서는
+ * 같은 자리에 스택 대신 **큐**를 그리고 이름표도 바꿔 단다. 자료구조 하나를
+ * 바꾼 것이 깊이 우선을 너비 우선로 바꾼다는 사실이 이 위젯의 두 번째 교훈이다.
+ *
+ * 왜 출력열을 트리 아래에 따로 쌓는가: 순회의 결과물은 "노드에 칠해진 색"이
+ * 아니라 **순서를 가진 수열**이다. 수열이 한 칸씩 자라나는 것을 봐야
+ * "중위는 정렬이 나온다"(II-9) 같은 문장이 눈으로 확인된다.
+ */
+(function () {
+  'use strict';
+
+  var K = window.WidgetKit;
+  if (!K) return;
+
+  // 노드가 이보다 많아지면 잎 간격이 글자보다 좁아져 읽을 수 없다.
+  // "많이 보여주기"보다 "읽히게 보여주기"가 우선이라 여기서 자른다.
+  var MAX_N = 31;
+  var MAX_STEPS = 400;   // 계약 §7: 스텝 수 상한
+
+  // ---------------------------------------------------------------- opts 검증
+  //
+  // opts 는 본문 저자가 손으로 쓴 JSON 이다. 무엇이 들어와도 던지지 않는다.
+
+  function isArr(v) {
+    return !!v && typeof v === 'object' && typeof v.length === 'number' && typeof v !== 'string';
+  }
+
+  function toNum(v) {
+    if (typeof v === 'number' && isFinite(v)) return v;
+    if (typeof v === 'string' && v.trim() !== '' && isFinite(Number(v))) return Number(v);
+    return null;
+  }
+
+  // 노드 표시 라벨. 숫자든 짧은 문자열이든 받되 칸에 들어갈 길이로 자른다.
+  function toLabel(v) {
+    if (v === null || v === undefined) return null;
+    if (typeof v === 'number') return isFinite(v) ? String(v) : null;
+    if (typeof v === 'string') {
+      var s = v.trim();
+      if (!s) return null;
+      return s.length > 4 ? s.slice(0, 4) : s;
+    }
+    return null;
+  }
+
+  var ORDER_ALIAS = {
+    pre: 'pre', preorder: 'pre', 'pre-order': 'pre', 전위: 'pre',
+    'in': 'in', inorder: 'in', 'in-order': 'in', 중위: 'in',
+    post: 'post', postorder: 'post', 'post-order': 'post', 후위: 'post',
+    level: 'level', levelorder: 'level', 'level-order': 'level', bfs: 'level', 레벨: 'level'
+  };
+
+  var ORDER_LABEL = { pre: '전위', 'in': '중위', post: '후위', level: '레벨' };
+  var ORDER_FULL = {
+    pre: '전위 (뿌리 → 왼쪽 → 오른쪽)',
+    'in': '중위 (왼쪽 → 뿌리 → 오른쪽)',
+    post: '후위 (왼쪽 → 오른쪽 → 뿌리)',
+    level: '레벨 (깊이 순 — 큐를 쓴다)'
+  };
+
+  function normOrder(v) {
+    if (typeof v !== 'string') return null;
+    return ORDER_ALIAS[v.trim().toLowerCase()] || null;
+  }
+
+  // ---------------------------------------------------------------- 트리 만들기
+  //
+  // 세 가지 입력을 받는다. 본문 저자가 상황에 따라 편한 형태를 쓰기 때문이다.
+  //   tree: [50,30,70,...]      레벨 순서 배열 (힙 위젯과 같은 규칙: 자식 2i+1, 2i+2)
+  //   tree: {v:50,l:{...},r:{}} 중첩 객체
+  //   edges: [[1,2],[1,3]] + root   간선 목록 (IV-8 처럼 그래프로 주어진 트리)
+  //   values: [...] + bst:true      삽입으로 BST 를 만든다
+
+  function newNode(id, label) {
+    return { id: id, label: label, left: -1, right: -1, kids: [], parent: -1, depth: 0 };
+  }
+
+  function fromArray(arr) {
+    if (!isArr(arr) || arr.length === 0) return null;
+    var rootLabel = toLabel(arr[0]);
+    if (rootLabel === null) return null;
+    var ns = [newNode(0, rootLabel)];
+    var slot = {};            // 배열 인덱스 → 노드 id
+    slot[0] = 0;
+    var q = [0];
+    while (q.length) {
+      var ai = q.shift();
+      var node = ns[slot[ai]];
+      var pair = [2 * ai + 1, 2 * ai + 2];
+      for (var s = 0; s < 2; s++) {
+        var ci = pair[s];
+        if (ci >= arr.length || ns.length >= MAX_N) continue;
+        var lb = toLabel(arr[ci]);
+        if (lb === null) continue;              // 빈 자리 = 자식 없음
+        var child = newNode(ns.length, lb);
+        child.parent = node.id;
+        child.depth = node.depth + 1;
+        ns.push(child);
+        slot[ci] = child.id;
+        if (s === 0) node.left = child.id; else node.right = child.id;
+        node.kids.push(child.id);
+        q.push(ci);
+      }
+    }
+    return ns;
+  }
+
+  function fromNested(obj) {
+    if (!obj || typeof obj !== 'object' || isArr(obj)) return null;
+    var ns = [];
+    function walk(o, parent, depth) {
+      if (!o || typeof o !== 'object' || ns.length >= MAX_N) return -1;
+      var lb = toLabel(o.v !== undefined ? o.v : (o.value !== undefined ? o.value : o.key));
+      if (lb === null) return -1;
+      var n = newNode(ns.length, lb);
+      n.parent = parent;
+      n.depth = depth;
+      ns.push(n);
+      var l = walk(o.l !== undefined ? o.l : o.left, n.id, depth + 1);
+      var r = walk(o.r !== undefined ? o.r : o.right, n.id, depth + 1);
+      n.left = l; n.right = r;
+      if (l >= 0) n.kids.push(l);
+      if (r >= 0) n.kids.push(r);
+      return n.id;
+    }
+    var root = walk(obj, -1, 0);
+    return root === 0 ? ns : null;
+  }
+
+  function fromEdges(edges, rootOpt) {
+    if (!isArr(edges) || edges.length === 0) return null;
+    var adj = {};             // 라벨 → 이웃 라벨 배열
+    var seen = [];
+    function touch(k) {
+      if (!adj[k]) { adj[k] = []; seen.push(k); }
+    }
+    for (var i = 0; i < edges.length; i++) {
+      var e = edges[i];
+      if (!isArr(e) || e.length < 2) continue;
+      var a = toLabel(e[0]), b = toLabel(e[1]);
+      if (a === null || b === null || a === b) continue;
+      touch(a); touch(b);
+      if (adj[a].indexOf(b) < 0) adj[a].push(b);
+      if (adj[b].indexOf(a) < 0) adj[b].push(a);
+    }
+    if (!seen.length) return null;
+
+    var rootLabel = toLabel(rootOpt);
+    if (rootLabel === null || !adj[rootLabel]) rootLabel = seen[0];
+
+    // 자식 순서를 정렬해 고정한다. 스텝이 매번 같아야 되감기와 테스트가 재현된다.
+    var numeric = seen.every(function (k) { return toNum(k) !== null; });
+    function sortKids(list) {
+      var out = list.slice();
+      out.sort(function (x, y) {
+        return numeric ? (toNum(x) - toNum(y)) : (x < y ? -1 : (x > y ? 1 : 0));
+      });
+      return out;
+    }
+
+    var ns = [newNode(0, rootLabel)];
+    var idOf = {};
+    idOf[rootLabel] = 0;
+    var q = [rootLabel];
+    var visited = {};
+    visited[rootLabel] = true;
+    while (q.length) {
+      var cur = q.shift();
+      var node = ns[idOf[cur]];
+      var nb = sortKids(adj[cur]);
+      for (var j = 0; j < nb.length; j++) {
+        var c = nb[j];
+        if (visited[c] || ns.length >= MAX_N) continue;   // 부모로 되돌아가는 간선은 여기서 걸린다
+        visited[c] = true;
+        var child = newNode(ns.length, c);
+        child.parent = node.id;
+        child.depth = node.depth + 1;
+        ns.push(child);
+        idOf[c] = child.id;
+        node.kids.push(child.id);
+        q.push(c);
+      }
+    }
+    return ns;
+  }
+
+  function fromBST(values) {
+    if (!isArr(values)) return null;
+    var ns = [];
+    for (var i = 0; i < values.length && ns.length < MAX_N; i++) {
+      var v = toNum(values[i]);
+      if (v === null) continue;
+      var lb = toLabel(v);
+      if (ns.length === 0) { ns.push(newNode(0, lb)); continue; }
+      // 삽입: 작으면 왼쪽, 크면 오른쪽. 같은 값은 버린다(중복은 BST 의 정렬 증명을 흐린다).
+      var cur = 0, guard = 0;
+      while (guard++ < MAX_N * 2) {
+        var node = ns[cur];
+        var nv = toNum(node.label);
+        if (v === nv) { cur = -1; break; }
+        var goLeft = v < nv;
+        var next = goLeft ? node.left : node.right;
+        if (next < 0) {
+          var child = newNode(ns.length, lb);
+          child.parent = node.id;
+          child.depth = node.depth + 1;
+          ns.push(child);
+          if (goLeft) node.left = child.id; else node.right = child.id;
+          node.kids = [];
+          if (node.left >= 0) node.kids.push(node.left);
+          if (node.right >= 0) node.kids.push(node.right);
+          cur = -1;
+          break;
+        }
+        cur = next;
+      }
+    }
+    return ns.length ? ns : null;
+  }
+
+  var DEFAULT_TREE = [50, 30, 70, 20, 40, 60, 80];
+
+  function buildModel(opts) {
+    var ns = null;
+    if (opts.bst === true && isArr(opts.values)) ns = fromBST(opts.values);
+    if (!ns && isArr(opts.tree)) ns = fromArray(opts.tree);
+    if (!ns && opts.tree && typeof opts.tree === 'object') ns = fromNested(opts.tree);
+    if (!ns && isArr(opts.edges)) ns = fromEdges(opts.edges, opts.root);
+    if (!ns && isArr(opts.values)) ns = fromBST(opts.values);
+    if (!ns) ns = fromArray(DEFAULT_TREE);
+
+    // 이진 트리인가 — 자식이 셋 이상인 노드가 하나라도 있으면 중위는 정의되지 않는다.
+    // (II-10 §2.1: "가운데"가 어디인지 정할 수 없기 때문이다.)
+    var binary = true, height = 0, i;
+    for (i = 0; i < ns.length; i++) {
+      if (ns[i].kids.length > 2) binary = false;
+      if (ns[i].depth > height) height = ns[i].depth;
+    }
+
+    // 순회가 볼 슬롯을 확정한다. 이진이면 [왼쪽, 오른쪽] 두 칸(-1 = 없음)이고,
+    // 그렇지 않으면 자식 목록 그대로다.
+    for (i = 0; i < ns.length; i++) {
+      var n = ns[i];
+      if (binary) {
+        if (n.left < 0 && n.right < 0 && n.kids.length) {
+          // 간선 목록으로 만든 트리는 좌우 구분이 없다. 정렬된 자식 순서를 좌우로 삼는다.
+          n.left = n.kids.length > 0 ? n.kids[0] : -1;
+          n.right = n.kids.length > 1 ? n.kids[1] : -1;
+        }
+        n.slots = [n.left, n.right];
+      } else {
+        n.slots = n.kids.slice();
+      }
+    }
+
+    // 중위 순회가 실제로 정렬을 내는가 — 저자가 shape:"bst" 라고 적었더라도
+    // 값으로 직접 확인한다. 위젯이 거짓말을 하면 안 된다(계약 §9).
+    var seq = [];
+    (function inorder(u) {
+      if (u < 0) return;
+      inorder(ns[u].left);
+      seq.push(ns[u].label);
+      inorder(ns[u].right);
+    })(0);
+    var sorted = binary && seq.length === ns.length;
+    for (i = 1; sorted && i < seq.length; i++) {
+      var a = toNum(seq[i - 1]), b = toNum(seq[i]);
+      if (a === null || b === null || !(a < b)) sorted = false;
+    }
+
+    return { nodes: ns, root: 0, binary: binary, height: height, sortedInorder: sorted };
+  }
+
+  // ---------------------------------------------------------------- 순회 스텝
+  //
+  // 계약 §7: 상태를 미리 전부 계산해 배열에 담는다. render(i) 는 그리기만 한다.
+  // 그래야 되감기가 즉시 되고, 같은 i 는 항상 같은 그림이 된다.
+  //
+  // 알고리즘은 본문 II-10 §4 의 `::: dual` 코드와 같다. 다른 것은 재귀를
+  // 명시적 프레임으로 펼쳐 스택을 그릴 수 있게 한 것뿐이다.
+
+  function buildSteps(model, order, accumulate) {
+    var ns = model.nodes;
+    var N = ns.length;
+    var steps = [];
+    var out = [];                       // 출력된 노드 id (순서 그대로)
+    var stack = [];                     // 재귀 프레임 {u, st}
+    var vals = new Array(N);            // 노드에 붙는 누적값 (깊이 또는 서브트리 크기)
+    var size = new Array(N);
+    var truncated = false;
+    for (var z = 0; z < N; z++) { vals[z] = null; size[z] = 0; }
+
+    // 어떤 값을 노드에 붙일 것인가.
+    //   깊이는 **내려가는 길**에 확정되고(전위·레벨), 서브트리 크기는 **올라오는 길**에만
+    //   확정된다(후위). IV-8 이 "한 번의 DFS 가 양방향 정보를 다 나른다"고 말하는 그 두 값이다.
+    //   중위에는 둘 다 걸리지 않으므로 아무것도 붙이지 않는다 — 정렬 출력에서 눈을 뺏기지 않게.
+    var showDepth = (accumulate === 'depth') || (accumulate === 'size' && (order === 'pre' || order === 'level'));
+    var showSize = (accumulate === 'size' && order === 'post');
+
+    function lab(id) { return id >= 0 ? ns[id].label : '없음'; }
+
+    // 조사 맞추기. 숫자 라벨은 읽는 소리의 받침에 따라 을/를이 갈린다
+    // (50 → 오십'을', 40 → 사십'를'... 이 아니라 사십'을'? 아니다 — 4는 '사'라
+    //  받침이 없어 40 은 '사십'으로 읽히므로 받침 ㅂ이 아니라 ㅂ... 여기서는
+    //  마지막 자릿수의 소리를 기준으로 삼는다: 0 영·1 일·3 삼·6 육·7 칠·8 팔은 받침 있음).
+    // 위젯이 읽어 주는 문장이라 조사가 틀리면 그대로 눈에 띈다.
+    function hasJong(s) {
+      var ch = s.charAt(s.length - 1);
+      if (ch >= '0' && ch <= '9') return '013678'.indexOf(ch) >= 0;
+      var code = s.charCodeAt(s.length - 1);
+      if (code >= 0xAC00 && code <= 0xD7A3) return ((code - 0xAC00) % 28) !== 0;
+      return false;
+    }
+    function ul(id) { return lab(id) + (hasJong(lab(id)) ? ' 을' : ' 를'); }
+    function eun(id) { return lab(id) + (hasJong(lab(id)) ? ' 은' : ' 는'); }
+    function ro(id) {
+      var s = lab(id);
+      var ch = s.charAt(s.length - 1);
+      var rieul;
+      if (ch >= '0' && ch <= '9') rieul = '178'.indexOf(ch) >= 0;   // 일·칠·팔은 ㄹ 받침
+      else {
+        var code = s.charCodeAt(s.length - 1);
+        rieul = (code >= 0xAC00 && code <= 0xD7A3) && ((code - 0xAC00) % 28) === 8;
+      }
+      return s + (hasJong(s) && !rieul ? ' 으로' : ' 로');
+    }
+    function seqText(k) {
+      // 출력열이 길어지면 상태 줄이 넘친다. 뒤쪽 몇 개만 보인다.
+      var arr = out.map(lab);
+      if (arr.length <= k) return arr.join(' ');
+      return '… ' + arr.slice(arr.length - k).join(' ');
+    }
+
+    function snap(o) {
+      if (steps.length >= MAX_STEPS) { truncated = true; return false; }
+      var fr = [];
+      for (var i = 0; i < stack.length; i++) fr.push({ u: stack[i].u, st: stack[i].st });
+      steps.push({
+        kind: o.kind,
+        u: o.u == null ? -1 : o.u,
+        visit: !!o.visit,
+        stack: fr,
+        pop: o.pop || null,               // 지금 빠져나가는 프레임 (점선으로 그린다)
+        queue: o.queue ? o.queue.slice() : null,
+        out: out.slice(),
+        vals: vals.slice(),
+        edge: o.edge || null,
+        msg: o.msg || ''
+      });
+      return true;
+    }
+
+    function depthNote(u) {
+      return showDepth ? ' 깊이 ' + ns[u].depth + '.' : '';
+    }
+
+    // ---- 깊이 우선 (전위 · 중위 · 후위) ----
+    function dfs(u) {
+      var node = ns[u];
+      var parent = node.parent;
+      stack.push({ u: u, st: 0 });
+
+      if (showDepth) vals[u] = node.depth;   // 깊이는 내려가는 길에 확정된다
+
+      var visitNow = (order === 'pre');
+      if (visitNow) out.push(u);
+
+      var msg;
+      if (visitNow) {
+        msg = lab(u) + ' 에 들어간다. 전위는 [1] 자리 — 들어가는 순간 출력한다. ' +
+              '부모까지의 결과는 이미 확정되어 있다.' + depthNote(u) +
+              ' → 출력 ' + seqText(8);
+      } else {
+        var firstChild = node.slots.length ? node.slots[0] : -1;
+        var next;
+        if (firstChild >= 0) {
+          next = (model.binary ? '왼쪽 자식 ' : '첫 자식 ') + ro(firstChild) + ' 내려간다.';
+        } else if (node.kids.length) {
+          // 왼쪽만 비어 있는 경우다. "자식이 없다"고 쓰면 그림과 어긋난다.
+          next = order === 'in'
+            ? '왼쪽 자식이 없다. 왼쪽 서브트리가 비었으니 곧장 [2] 자리로 간다.'
+            : '왼쪽 자식이 없어 오른쪽 자식 ' + ro(node.kids[0]) + ' 바로 넘어간다.';
+        } else {
+          next = '잎이라 내려갈 자식이 없어 바로 되돌아갈 준비를 한다.';
+        }
+        msg = ul(u) + ' 호출한다. 프레임을 쌓는다. ' + next +
+              ' 아직 출력하지 않는다 — ' + (order === 'in' ? '중위는 [2]' : '후위는 [3]') + ' 자리에서 찍는다.' +
+              ' 스택 깊이 ' + stack.length + '.';
+      }
+      if (!snap({ kind: 'enter', u: u, visit: visitNow, edge: parent >= 0 ? { a: parent, b: u, dir: 'down' } : null, msg: msg })) return;
+
+      var slots = node.slots;
+      for (var s = 0; s < slots.length; s++) {
+        var c = slots[s];
+        if (c >= 0) {
+          dfs(c);
+          if (truncated) return;
+        }
+        stack[stack.length - 1].st = s + 1;
+
+        // 중위: 왼쪽 슬롯을 끝낸 [2] 자리가 출력 시점이다.
+        if (order === 'in' && s === 0) {
+          out.push(u);
+          var m2 = c >= 0
+            ? lab(u) + ' 의 왼쪽 서브트리를 다 돌았다. 중위 순회는 여기서 ' + ul(u) + ' 출력한다.'
+            : eun(u) + ' 왼쪽 자식이 없다. 왼쪽 서브트리가 비었으니 [2] 자리에 곧바로 도달해 ' + ul(u) + ' 출력한다.';
+          if (model.sortedInorder) m2 += ' 지금까지 오름차순이다.';
+          if (!snap({ kind: 'mid', u: u, visit: true, msg: m2 + ' → 출력 ' + seqText(8) })) return;
+        }
+      }
+
+      // ---- 나가는 길: 자식의 결과가 전부 모인 유일한 시점 ----
+      var sum = 0, parts = [];
+      for (var t = 0; t < node.kids.length; t++) { sum += size[node.kids[t]]; parts.push(String(size[node.kids[t]])); }
+      size[u] = 1 + sum;
+      if (showSize) vals[u] = size[u];
+
+      var visitOut = (order === 'post');
+      if (visitOut) out.push(u);
+      var frame = stack.pop();
+
+      var m3;
+      if (visitOut) {
+        m3 = lab(u) + ' 의 자식을 모두 끝냈다. 후위는 [3] 자리 — 여기서 ' + ul(u) + ' 출력한다.';
+        if (showSize) {
+          m3 += parts.length
+            ? ' 자식의 값이 다 모였으므로 size(' + lab(u) + ') = 1 + ' + parts.join(' + ') + ' = ' + size[u] + '.'
+            : ' 잎이라 더할 자식이 없다. size(' + lab(u) + ') = 1.';
+        }
+        m3 += ' → 출력 ' + seqText(8);
+      } else {
+        m3 = lab(u) + ' 의 프레임을 팝한다. ' +
+             (parent >= 0
+               ? '부모 ' + ro(parent) + ' 돌아가 ' + (order === 'in' ? '오른쪽' : '다음') + ' 차례를 이어간다.'
+               : '루트까지 돌아왔다. 스택이 비면 순회가 끝난다.');
+      }
+      snap({ kind: 'exit', u: u, visit: visitOut, pop: frame, edge: parent >= 0 ? { a: parent, b: u, dir: 'up' } : null, msg: m3 });
+    }
+
+    // ---- 너비 우선 (레벨) ----
+    function bfs() {
+      var q = [model.root];
+      snap({
+        kind: 'init', u: -1, queue: q,
+        msg: '큐에 루트 ' + ul(model.root) + ' 넣는다. 코드는 전위의 명시적 스택 버전과 같고 ' +
+             '자료구조만 스택 → 큐로 바뀌었다. 이 한 글자가 깊이 우선을 너비 우선으로 바꾼다.'
+      });
+      var guard = 0;
+      while (q.length && guard++ < MAX_N + 2) {
+        var u = q.shift();
+        if (showDepth) vals[u] = ns[u].depth;
+        out.push(u);
+        var kids = ns[u].kids;
+        for (var i = 0; i < kids.length; i++) q.push(kids[i]);
+        var kidText = '';
+        if (kids.length) {
+          // 목록 뒤의 조사도 마지막 항목의 받침을 따른다.
+          kidText = '자식 ' + kids.slice(0, -1).map(lab).concat([ul(kids[kids.length - 1])]).join(', ') +
+                    ' 큐 뒤에 넣는다.';
+        } else {
+          kidText = '잎이라 넣을 자식이 없다.';
+        }
+        var msg = '큐 앞에서 ' + ul(u) + ' 꺼내 출력한다. ' + kidText +
+                  ' 큐: [' + q.map(lab).join(', ') + ']. 레벨 ' + ns[u].depth + '.' +
+                  // 같은 설명을 매 스텝 반복하면 상태 줄이 소음이 된다. 처음 한 번만.
+                  (out.length === 1 ? ' 가중치가 전부 1일 때 이 레벨 번호가 곧 최단 거리다.' : '');
+        if (!snap({ kind: 'deq', u: u, visit: true, queue: q, edge: ns[u].parent >= 0 ? { a: ns[u].parent, b: u, dir: 'down' } : null, msg: msg })) return;
+      }
+    }
+
+    if (order === 'level') bfs();
+    else dfs(model.root);
+
+    // 마지막 스텝: 수열 전체가 답이다. 여기서만 금색(wPath)을 쓴다.
+    if (!truncated) {
+      var full = out.map(lab).join(' ');
+      var tail = '';
+      if (order === 'in' && model.sortedInorder) {
+        tail = ' 오름차순으로 정렬되어 나왔다 — BST 의 불변식이 곧 "중위 순서 = 정렬 순서"라는 문장이다.';
+      } else if (order === 'post' && accumulate === 'size') {
+        tail = ' 루트의 size = ' + size[model.root] + ' 이고 이것이 전체 노드 수다. 한 번의 순회로 모든 서브트리 크기가 채워졌다.';
+      } else if (order === 'level') {
+        tail = ' 이 순서가 곧 BFS 순서다.';
+      } else if (order === 'pre') {
+        tail = ' 뿌리가 맨 앞이고, 서브트리 하나를 완전히 끝낸 뒤 다음 서브트리로 넘어갔다.';
+      }
+      snap({
+        kind: 'done', u: -1, queue: order === 'level' ? [] : null,
+        msg: ORDER_LABEL[order] + ' 순회 완료. 결과: ' + full + '.' + tail
+      });
+    } else {
+      steps.push({
+        kind: 'done', u: -1, visit: false, stack: [], pop: null, queue: null,
+        out: out.slice(), vals: vals.slice(), edge: null,
+        msg: '스텝이 ' + MAX_STEPS + '개를 넘어 여기서 자른다. 트리가 너무 크다.'
+      });
+    }
+
+    return { steps: steps, out: out.slice(), sizes: size.slice() };
+  }
+
+  // ---------------------------------------------------------------- 배치
+  //
+  // 왜 "타이디 배치"인가 (heap-ops 와 같은 방식): 레벨마다 2^d 칸을 통째로 잡으면
+  // 마지막 레벨이 반만 차 있어도 폭을 다 먹어 좁은 화면에서 글자가 뭉갠다.
+  // 잎을 왼쪽부터 차례로 세우고 부모를 자식들의 중점에 두면 실제 노드 수만큼만
+  // 폭을 쓴다. 이 방식은 정의상 간선이 서로 교차하지 않는다.
+  //
+  // 자식이 하나뿐인 이진 노드는 **빈 칸을 예약**한다. 그래야 왼쪽 자식이 왼쪽에,
+  // 오른쪽 자식이 오른쪽에 보인다 — 중위 순회를 설명하는 위젯에서 좌우가
+  // 뒤집혀 보이면 그림이 거짓말을 한다.
+  function tidyCols(model) {
+    var ns = model.nodes;
+    var col = new Array(ns.length);
+    var next = 0;
+    (function walk(u) {
+      var n = ns[u];
+      var slots = n.slots;
+      var real = 0, i;
+      for (i = 0; i < slots.length; i++) if (slots[i] >= 0) real++;
+      if (!real) { col[u] = next++; return; }
+      var first = null, last = null;
+      for (i = 0; i < slots.length; i++) {
+        var c = slots[i];
+        var cx;
+        if (c >= 0) { walk(c); cx = col[c]; }
+        else if (model.binary) { cx = next++; }     // 빈 슬롯도 자리를 차지한다
+        else continue;
+        if (first === null) first = cx;
+        last = cx;
+      }
+      col[u] = (first + last) / 2;
+    })(model.root);
+    return { col: col, cols: Math.max(1, next) };
+  }
+
+  function layout(w, model, order, showStack, outCount, maxFrames) {
+    var tiny = w < 520, narrow = w < 790;
+    var pad = tiny ? 6 : (narrow ? 10 : 16);
+    var headH = tiny ? 13 : 15;
+    var nodeH = tiny ? 22 : (narrow ? 26 : 30);
+    // 간선이 보이는 길이. 자식 위 16px 은 누적값 필의 자리이고, 그 위에 방향 라벨(13)이
+    // 한 줄 더 들어가야 한다. 그래서 좁지 않은 폭에서는 32 이상을 확보한다.
+    var edge = tiny ? 24 : (narrow ? 32 : 36);
+    var vgap = nodeH + edge;
+
+    var t = tidyCols(model);
+    var levels = model.height + 1;
+
+    var isLevel = (order === 'level');
+    // 스택 패널을 옆에 둘 것인가. 좁으면 트리 아래 가로 띠로 눕힌다.
+    // 큐(레벨 순회)는 본래 가로로 읽는 것이라 폭과 무관하게 항상 아래에 눕힌다.
+    // 700px 은 본문 칼럼(약 750px)이 들어오는 선이다. 데스크톱에서 챕터를 열면
+    // 스택이 세로로 서고, 폰에서는 가로로 눕는다.
+    var sideStack = showStack && !isLevel && w >= 700;
+    var panelW = sideStack ? (w >= 900 ? 192 : 164) : 0;
+
+    var availW = Math.max(80, w - pad * 2);
+    var treeAreaW = Math.max(80, availW - (panelW ? panelW + 14 : 0));
+    var colW = Math.min(treeAreaW / t.cols, tiny ? 48 : (narrow ? 72 : 102));
+    var nodeW = Math.max(20, Math.min(colW * (tiny ? 0.84 : 0.8), tiny ? 40 : (narrow ? 48 : 56)));
+    var treeW = colW * t.cols;
+    var treeX = pad + Math.max(0, (treeAreaW - treeW) / 2);
+
+    var treeTop = pad + headH + (tiny ? 12 : 14);   // 루트 위 누적값 필 자리
+    var treeH = (levels - 1) * vgap + nodeH;
+
+    var frameH = tiny ? 20 : 24;
+    var panelY = pad + headH;
+    var panelH = sideStack ? (maxFrames * (frameH + 4) + 14) : 0;
+    if (sideStack) treeH = Math.max(treeH, panelH - (treeTop - panelY));
+
+    var y = treeTop + treeH + (tiny ? 12 : 18);
+
+    // 아래 가로 띠: 스택(눕힌 것) 또는 큐
+    var stripTop = 0, stripH = 0;
+    if (showStack && !sideStack) {
+      stripTop = y + headH;
+      stripH = frameH;
+      y = stripTop + stripH + (tiny ? 10 : 16);
+    }
+
+    // 출력열: 칸 크기를 지키고 줄바꿈한다. 순서를 읽는 것이 목적이라 칸이 작아지면 안 된다.
+    var maxLen = 1;
+    for (var i = 0; i < model.nodes.length; i++) maxLen = Math.max(maxLen, model.nodes[i].label.length);
+    var chipH = tiny ? 20 : 24;
+    var chipW = Math.max(tiny ? 24 : 28, 12 + maxLen * (tiny ? 7 : 8.5));
+    var perRow = Math.max(1, Math.floor(availW / (chipW + 4)));
+    var rows = Math.max(1, Math.ceil(Math.max(1, outCount) / perRow));
+    var outTop = y + headH;
+    var outBottom = outTop + rows * (chipH + 5) - 5;
+
+    var h = outBottom + pad;
+    if (sideStack) h = Math.max(h, panelY + panelH + pad);
+
+    return {
+      w: w, tiny: tiny, narrow: narrow, pad: pad, headH: headH,
+      cols: t.cols, col: t.col, levels: levels,
+      colW: colW, nodeW: nodeW, nodeH: nodeH, vgap: vgap, edge: edge,
+      treeX: treeX, treeTop: treeTop, treeH: treeH,
+      sideStack: sideStack, panelW: panelW, panelX: pad + treeAreaW + 14, panelY: panelY, panelH: panelH,
+      maxFrames: maxFrames,
+      frameH: frameH, stripTop: stripTop, stripH: stripH,
+      outTop: outTop, outBottom: outBottom, chipW: chipW, chipH: chipH, perRow: perRow, rows: rows,
+      height: h
+    };
+  }
+
+  function nodeXY(L, model, id) {
+    return {
+      x: L.treeX + (L.col[id] + 0.5) * L.colW - L.nodeW / 2,
+      y: L.treeTop + model.nodes[id].depth * L.vgap
+    };
+  }
+
+  // ---------------------------------------------------------------- 그리기 보조
+
+  function rrect(ctx, x, y, w, h, r) {
+    r = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+  }
+
+  // 간선 위의 화살촉. 좁은 화면에서 글자 라벨 대신 방향만 전한다.
+  function arrow(ctx, ax, ay, bx, by, up, color) {
+    var t = up ? 0.42 : 0.5;
+    var cx = ax + (bx - ax) * t, cy = ay + (by - ay) * t;
+    var dx = bx - ax, dy = by - ay;
+    var len = Math.sqrt(dx * dx + dy * dy) || 1;
+    var ux = (dx / len) * (up ? -1 : 1), uy = (dy / len) * (up ? -1 : 1);
+    var s = 5.5;
+    ctx.save();
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(cx + ux * s, cy + uy * s);
+    ctx.lineTo(cx - ux * s - uy * s * 0.7, cy - uy * s + ux * s * 0.7);
+    ctx.lineTo(cx - ux * s + uy * s * 0.7, cy - uy * s - ux * s * 0.7);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  K.register('tree-traversal', function (host, opts) {
+    opts = opts || {};
+    if (typeof opts !== 'object') opts = {};
+
+    var model = buildModel(opts);
+
+    // accumulate: 후위에서는 서브트리 크기, 내려가는 순회에서는 깊이를 노드에 붙인다.
+    // IV-8 이 요구하는 "한 번의 DFS 가 양방향 정보를 다 나른다"가 이 표시의 정체다.
+    var accumulate = 'size';
+    if (opts.accumulate === false || opts.accumulate === 'none') accumulate = 'none';
+    else if (opts.accumulate === 'depth') accumulate = 'depth';
+    else if (typeof opts.accumulate === 'string' && opts.accumulate !== 'size') accumulate = 'size';
+
+    var showStack = (opts.showStack === false) ? false : true;
+
+    // 제공할 순회 목록. 이진이 아니면 중위는 정의되지 않으므로 뺀다(II-10 §2.1).
+    var avail = [];
+    if (isArr(opts.orders)) {
+      for (var i = 0; i < opts.orders.length; i++) {
+        var o = normOrder(opts.orders[i]);
+        if (o && avail.indexOf(o) < 0) avail.push(o);
+      }
+    }
+    if (!avail.length) avail = ['pre', 'in', 'post', 'level'];
+    if (!model.binary) avail = avail.filter(function (x) { return x !== 'in'; });
+    if (!avail.length) avail = ['pre'];
+
+    var order = normOrder(opts.order);
+    if (!order || avail.indexOf(order) < 0) order = avail[0];
+
+    // highlight:"sorted-output" — 출력열을 "정렬 결과"로 강조한다(II-9).
+    var sortedHint = (opts.highlight === 'sorted-output') && model.sortedInorder;
+
+    var run = null;      // {steps, out, sizes}
+    var cur = 0;
+    var cache = null;
+
+    var ui = K.frame(host, { title: '', wide: false });
+    var titleEl = K.el('div', 'wk-title', '');
+    ui.head.insertBefore(titleEl, ui.head.firstChild);
+
+    function stackTitle() {
+      return order === 'level' ? '큐 (앞 → 뒤)' : '호출 스택 (아래 → 위)';
+    }
+
+    function setTitle() {
+      titleEl.textContent = '트리 순회 — ' + ORDER_FULL[order];
+    }
+
+    function rebuild(keepIndex) {
+      run = buildSteps(model, order, accumulate);
+      cache = null;
+      setTitle();
+      var idx = keepIndex ? Math.min(cur, run.steps.length - 1) : 0;
+      cur = idx < 0 ? 0 : idx;
+      if (play) play.goto(cur);
+    }
+
+    // ---- 머리말 컨트롤 ----
+    var segEl = null;
+    if (avail.length > 1) {
+      segEl = K.seg(ui.slot, avail.map(function (v) { return { label: ORDER_LABEL[v], value: v }; }), order, function (v) {
+        order = v;
+        rebuild(false);
+      });
+    }
+
+    // 버튼이 아닌 경로(테스트 훅)로 순회를 바꿔도 눌린 칸이 따라가야 한다.
+    function syncSeg() {
+      if (!segEl) return;
+      Array.prototype.forEach.call(segEl.children, function (c) {
+        c.classList.toggle('is-active', c.getAttribute('data-val') === order);
+      });
+    }
+
+    // ---- 범례 (§5: 색만으로 정보를 주지 않는다. 글자 표식도 같이 쓴다) ----
+    var legend = K.el('div', 'wk-legend');
+    legend.style.width = '100%';
+    legend.innerHTML =
+      '<span><i style="background:var(--w-frontier)"></i>지금 보는 노드</span>' +
+      '<span><i style="background:var(--accent-dim)"></i>스택에 올라 있음 ([1][2][3] = 코드 위치)</span>' +
+      '<span><i style="background:var(--w-visited)"></i>출력됨 (왼쪽 위 숫자 = 몇 번째)</span>' +
+      '<span><i style="background:var(--w-path)"></i>방금 출력</span>' +
+      (accumulate === 'none' ? '' : '<span>노드 위 필: 내려가며 깊이 d, 올라오며 크기 sz</span>');
+    ui.slot.appendChild(legend);
+
+    // 캔버스보다 먼저 스텝을 만든다. ResizeObserver 가 캔버스 생성 직후 비동기로
+    // redraw 를 부르는데 그때 run 이 없으면 그리다 던진다.
+    var play = null;
+    rebuild(false);
+
+    function L() {
+      var w = cv.size.w || 320;
+      var maxFrames = model.height + 2;      // 프레임 최대 개수 = 높이 + 1, 팝 표시 한 칸
+      if (!cache || cache.w !== w || cache.key !== order) {
+        cache = layout(w, model, order, showStack, model.nodes.length, maxFrames);
+        cache.key = order;
+      }
+      return cache;
+    }
+
+    // 노드 상태 → 색·표식. 우선순위: 방금 출력 > 지금 보는 것 > 스택 > 출력됨 > 보통
+    function styleOf(s, id) {
+      var onStack = -1;
+      for (var i = 0; i < s.stack.length; i++) if (s.stack[i].u === id) onStack = s.stack[i].st;
+      var isCur = (s.u === id);
+      var rank = s.out.indexOf(id);
+      var justOut = s.visit && isCur;
+
+      var st = { c: null, a: 0, lw: 1.2, mark: '', rank: rank >= 0 ? rank + 1 : 0 };
+      if (justOut) { st.c = 'wPath'; st.a = 0.34; st.lw = 2.6; }
+      else if (isCur) { st.c = 'wFrontier'; st.a = 0.26; st.lw = 2.6; }
+      else if (onStack >= 0) { st.c = 'wFrontier'; st.a = 0.10; st.lw = 1.8; }
+      else if (rank >= 0) { st.c = 'wVisited'; st.a = 0.36; st.lw = 1.2; }
+
+      if (onStack >= 0 && model.binary) st.mark = '[' + (onStack + 1) + ']';
+      else if (onStack >= 0) st.mark = '·' + onStack;
+      return st;
+    }
+
+    function pill(ctx, T, cx, cy, text, color, l) {
+      ctx.save();
+      ctx.font = (l.tiny ? 8.5 : 9.5) + 'px ui-monospace, monospace';
+      var tw = ctx.measureText(text).width;
+      var w = tw + 9, h = 13;
+      // 불투명 바탕: 간선 위에 얹혀도 글자가 선에 그어지지 않는다.
+      ctx.fillStyle = T.bg;
+      rrect(ctx, cx - w / 2, cy - h / 2, w, h, 3);
+      ctx.fill();
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = color;
+      ctx.stroke();
+      ctx.fillStyle = color;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(text, cx, cy + 0.5);
+      ctx.restore();
+    }
+
+    function box(ctx, T, x, y, w, h, text, st, l, dashed) {
+      ctx.save();
+      // 캔버스는 투명하게 시작한다. 농도(globalAlpha)로 칠하려면 먼저 불투명 바탕을 깔아야 한다.
+      ctx.fillStyle = T.bgElev;
+      rrect(ctx, x, y, w, h, 5);
+      ctx.fill();
+      if (st.c) {
+        ctx.globalAlpha = st.a;
+        ctx.fillStyle = T[st.c];
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+      ctx.lineWidth = st.lw;
+      ctx.strokeStyle = st.c ? T[st.c] : T.border;
+      if (dashed) { ctx.setLineDash([3, 3]); ctx.strokeStyle = T.fgFaint; }
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      var corner = l.tiny ? 8 : 9;
+      ctx.font = corner + 'px ui-monospace, monospace';
+      ctx.textBaseline = 'top';
+      if (st.rank) {
+        // 출력 순번을 노드에 직접 찍는다. 수열과 트리를 잇는 다리다.
+        // '#' 를 붙이는 이유: 숫자만 찍으면 노드 값과 헷갈린다.
+        ctx.fillStyle = T.fgFaint;
+        ctx.textAlign = 'left';
+        ctx.fillText('#' + st.rank, x + 3, y + 2);
+      }
+      if (st.mark) {
+        ctx.fillStyle = st.c ? T[st.c] : T.fgFaint;
+        ctx.textAlign = 'right';
+        ctx.fillText(st.mark, x + w - 3, y + 2);
+      }
+
+      ctx.fillStyle = T.fg;
+      ctx.font = '700 ' + (l.tiny ? 11 : 13) + 'px ui-monospace, monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'alphabetic';
+      ctx.fillText(text, x + w / 2, y + h - (l.tiny ? 4 : 6));
+      ctx.restore();
+    }
+
+    function sectionTitle(ctx, T, l, text, x, y, align) {
+      ctx.fillStyle = T.fgDim;
+      ctx.font = '700 ' + (l.tiny ? 9.5 : 11) + 'px system-ui, sans-serif';
+      ctx.textAlign = align || 'left';
+      ctx.textBaseline = 'alphabetic';
+      ctx.fillText(text, x, y);
+    }
+
+    var cv = K.canvas(ui.stage, {
+      height: function (w) {
+        return layout(w, model, order, showStack, model.nodes.length, model.height + 2).height;
+      },
+      draw: function (ctx, size, T) {
+        var s = run.steps[cur];
+        if (!s) return;
+        var l = L();
+        var ns = model.nodes;
+        var i;
+
+        ctx.textBaseline = 'alphabetic';
+        sectionTitle(ctx, T, l, '트리', l.pad, l.pad + (l.tiny ? 9 : 11));
+        // 좁은 화면에서는 순회 이름을 캔버스에 다시 적지 않는다. 머리말 제목에 이미 있고,
+        // 루트 위 누적값 필과 자리를 다투기 때문이다.
+        if (!l.narrow) sectionTitle(ctx, T, l, ORDER_FULL[order], size.w - l.pad, l.pad + (l.tiny ? 9 : 11), 'right');
+
+        // ---- 간선 ----
+        // 지금 타고 내려가거나 올라오는 간선만 강조한다. 전부 칠하면 어디가
+        // 현재 경로인지 사라진다.
+        for (i = 0; i < ns.length; i++) {
+          var p = ns[i].parent;
+          if (p < 0) continue;
+          var a = nodeXY(l, model, p), b = nodeXY(l, model, i);
+          var active = s.edge && ((s.edge.a === p && s.edge.b === i));
+          // 스택에 부모와 자식이 함께 올라 있으면 그 간선이 곧 현재 재귀 경로다.
+          var onPath = false;
+          for (var q = 1; q < s.stack.length; q++) {
+            if (s.stack[q].u === i && s.stack[q - 1].u === p) onPath = true;
+          }
+          ctx.save();
+          ctx.beginPath();
+          ctx.moveTo(a.x + l.nodeW / 2, a.y + l.nodeH);
+          ctx.lineTo(b.x + l.nodeW / 2, b.y);
+          if (active) { ctx.strokeStyle = s.edge.dir === 'up' ? T.wVisited : T.wFrontier; ctx.lineWidth = 2.6; }
+          else if (onPath) { ctx.strokeStyle = T.wFrontier; ctx.lineWidth = 1.9; ctx.globalAlpha = 0.6; }
+          else { ctx.strokeStyle = T.border; ctx.lineWidth = 1.2; }
+          ctx.stroke();
+          ctx.restore();
+
+          // 방금 지나간 간선에만 방향 표식을 붙인다.
+          if (active) {
+            var ax = a.x + l.nodeW / 2, ay = a.y + l.nodeH;
+            var bx = b.x + l.nodeW / 2, by = b.y;
+            var col = s.edge.dir === 'up' ? T.wVisited : T.wFrontier;
+            if (l.edge >= 30) {
+              // 자식 위 16px 은 누적값 필의 자리다. 그 위쪽 띠의 한가운데에 놓아
+              // 두 라벨이 절대 겹치지 않게 한다.
+              var py = (ay + (by - 16)) / 2;
+              var tt = (by - ay) === 0 ? 0.3 : (py - ay) / (by - ay);
+              pill(ctx, T, ax + (bx - ax) * tt, py,
+                   order === 'level' ? '↓ 꺼냄' : (s.edge.dir === 'up' ? '↑ 복귀' : '↓ 호출'), col, l);
+            } else {
+              // 좁은 화면에서는 필 두 개가 들어갈 띠가 없다. 화살촉으로 방향만 준다.
+              arrow(ctx, ax, ay, bx, by, s.edge.dir === 'up', col);
+            }
+          }
+        }
+
+        // ---- 노드 ----
+        for (i = 0; i < ns.length; i++) {
+          var xy = nodeXY(l, model, i);
+          box(ctx, T, xy.x, xy.y, l.nodeW, l.nodeH, ns[i].label, styleOf(s, i), l, false);
+        }
+        // 누적값 필은 노드를 다 그린 뒤 얹는다. 박스 위 빈 띠에 놓아 간선과 겹쳐도
+        // 불투명 바탕이 가려 준다.
+        if (accumulate !== 'none') {
+          for (i = 0; i < ns.length; i++) {
+            if (s.vals[i] == null) continue;
+            var v = nodeXY(l, model, i);
+            var isSize = (order === 'post' && accumulate === 'size');
+            pill(ctx, T, v.x + l.nodeW / 2, v.y - (l.tiny ? 8 : 9),
+                 (isSize ? 'sz ' : 'd ') + s.vals[i],
+                 isSize ? T.wVisited : T.fgFaint, l);
+          }
+        }
+
+        // ---- 스택 / 큐 ----
+        if (showStack) {
+          var frames = s.stack;
+          var isLevel = (order === 'level');
+          if (l.sideStack) {
+            // 세로 패널: 아래가 바닥(루트), 위가 top. 스택은 쌓이는 것이라 위로 자란다.
+            ctx.save();
+            ctx.fillStyle = T.bgCode;
+            rrect(ctx, l.panelX, l.panelY, l.panelW, l.panelH, 6);
+            ctx.fill();
+            ctx.strokeStyle = T.border;
+            ctx.lineWidth = 1;
+            ctx.stroke();
+            ctx.restore();
+            sectionTitle(ctx, T, l, stackTitle(), l.panelX + 9, l.panelY - 4);
+
+            var baseY = l.panelY + l.panelH - 7 - l.frameH;
+            // 빈 칸을 점선으로 남긴다. 패널 높이가 곧 "스택이 최대 트리 높이 + 1
+            // 프레임까지 자란다"는 사실이고, 빈 칸이 그 여유를 보여 준다.
+            ctx.save();
+            ctx.setLineDash([2, 3]);
+            ctx.strokeStyle = T.border;
+            ctx.globalAlpha = 0.5;
+            ctx.lineWidth = 1;
+            for (i = frames.length + (s.pop ? 1 : 0); i < l.maxFrames; i++) {
+              rrect(ctx, l.panelX + 8, baseY - i * (l.frameH + 4), l.panelW - 16, l.frameH, 4);
+              ctx.stroke();
+            }
+            ctx.restore();
+            for (i = 0; i < frames.length; i++) {
+              var fy = baseY - i * (l.frameH + 4);
+              var top = (i === frames.length - 1);
+              drawFrame(ctx, T, l, l.panelX + 8, fy, l.panelW - 16, frames[i], top, false);
+            }
+            if (s.pop) {
+              drawFrame(ctx, T, l, l.panelX + 8, baseY - frames.length * (l.frameH + 4),
+                        l.panelW - 16, s.pop, false, true);
+            }
+            if (!frames.length && !s.pop) {
+              ctx.fillStyle = T.fgFaint;
+              ctx.font = (l.tiny ? 9 : 10) + 'px system-ui, sans-serif';
+              ctx.textAlign = 'center';
+              ctx.fillText('비어 있음', l.panelX + l.panelW / 2, l.panelY + l.panelH / 2);
+            }
+          } else {
+            // 가로 띠: 왼쪽이 바닥(또는 큐의 앞), 오른쪽이 top(또는 큐의 뒤).
+            sectionTitle(ctx, T, l, isLevel ? '큐 (왼쪽이 앞 — 여기서 꺼낸다)' : '호출 스택 (오른쪽이 top)',
+                         l.pad, l.stripTop - 4);
+            var items = isLevel ? (s.queue || []).map(function (u) { return { u: u, st: -1 }; }) : frames;
+            var fw = Math.max(l.tiny ? 34 : 42, Math.min(l.tiny ? 52 : 74, (l.w - l.pad * 2) / Math.max(4, items.length + (s.pop ? 1 : 0))));
+            var fx = l.pad;
+            for (i = 0; i < items.length; i++) {
+              if (fx + fw > l.w - l.pad) break;
+              drawFrame(ctx, T, l, fx, l.stripTop, fw - 4, items[i], !isLevel && i === items.length - 1, false);
+              fx += fw;
+            }
+            if (!isLevel && s.pop && fx + fw <= l.w - l.pad) {
+              drawFrame(ctx, T, l, fx, l.stripTop, fw - 4, s.pop, false, true);
+            }
+            if (!items.length && !s.pop) {
+              ctx.fillStyle = T.fgFaint;
+              ctx.font = (l.tiny ? 9 : 10) + 'px system-ui, sans-serif';
+              ctx.textAlign = 'left';
+              ctx.textBaseline = 'middle';
+              ctx.fillText('비어 있음', l.pad + 2, l.stripTop + l.stripH / 2);
+            }
+          }
+        }
+        if (l.sideStack && order === 'level') {
+          // 도달할 수 없는 조합이지만, 배치가 바뀌어도 큐 이름표가 사라지지 않게 남긴다.
+          sectionTitle(ctx, T, l, '큐', l.panelX + 9, l.panelY - 4);
+        }
+
+        // ---- 출력열 ----
+        var cap = '출력 (' + ORDER_LABEL[order] + ' 순서)';
+        if (sortedHint && order === 'in') cap += ' — 오름차순으로 나온다';
+        sectionTitle(ctx, T, l, cap, l.pad, l.outTop - 4);
+        var done = (s.kind === 'done');
+        for (i = 0; i < model.nodes.length; i++) {
+          var r = Math.floor(i / l.perRow), c = i % l.perRow;
+          var cx0 = l.pad + c * (l.chipW + 4);
+          var cy0 = l.outTop + r * (l.chipH + 5);
+          var filled = i < s.out.length;
+          var stc = { c: null, a: 0, lw: 1, mark: '', rank: 0 };
+          if (filled) {
+            var last = (i === s.out.length - 1);
+            stc.c = done ? 'wPath' : (last ? 'wPath' : 'wVisited');
+            stc.a = done ? 0.28 : (last ? 0.34 : 0.3);
+            stc.lw = last ? 2.2 : 1.2;
+          }
+          ctx.save();
+          if (!filled) ctx.globalAlpha = 0.45;
+          box(ctx, T, cx0, cy0, l.chipW, l.chipH,
+              filled ? model.nodes[s.out[i]].label : '·', stc, l, !filled);
+          ctx.restore();
+        }
+      }
+    });
+
+    function drawFrame(ctx, T, l, x, y, w, f, isTop, dashed) {
+      var st = {
+        c: dashed ? null : (isTop ? 'wFrontier' : 'accentDim'),
+        a: dashed ? 0 : (isTop ? 0.26 : 0.12),
+        lw: isTop ? 2.2 : 1.2,
+        mark: '',
+        rank: 0
+      };
+      // accent-dim 은 토큰 표에 있는 값이다. 없으면 frontier 로 떨어뜨린다.
+      if (st.c === 'accentDim' && !T.accentDim) st.c = 'wFrontier';
+      var text = model.nodes[f.u].label;
+      if (f.st >= 0 && model.binary) text += ' [' + (f.st + 1) + ']';
+      else if (f.st > 0) text += ' ·' + f.st;
+      ctx.save();
+      ctx.fillStyle = T.bgElev;
+      rrect(ctx, x, y, w, l.frameH, 4);
+      ctx.fill();
+      if (st.c) {
+        ctx.globalAlpha = st.a;
+        ctx.fillStyle = T[st.c];
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+      ctx.lineWidth = st.lw;
+      ctx.strokeStyle = dashed ? T.fgFaint : (st.c ? T[st.c] : T.border);
+      if (dashed) ctx.setLineDash([3, 3]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      ctx.fillStyle = dashed ? T.fgFaint : T.fg;
+      ctx.font = (l.tiny ? 10 : 11.5) + 'px ui-monospace, monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(dashed ? text + ' ↑' : text, x + w / 2, y + l.frameH / 2 + 0.5);
+      ctx.restore();
+    }
+
+    play = K.player(ui, {
+      total: function () { return run.steps.length; },
+      render: function (i) { cur = i; cv.redraw(); },
+      label: function (i) {
+        var s = run.steps[i];
+        if (!s) return '';
+        return '[' + ORDER_LABEL[order] + '] ' + s.msg;
+      },
+      speed: 640
+    });
+
+    setTitle();
+    play.goto(0);
+
+    // 테스트·디버깅용 훅. 계약상 전역 오염은 금지라 host 요소에만 붙인다.
+    host.__treeTraversal = {
+      order: function () { return order; },
+      orders: function () { return avail.slice(); },
+      setOrder: function (v) {
+        var o = normOrder(v);
+        if (!o || avail.indexOf(o) < 0) return false;
+        order = o;
+        rebuild(false);
+        syncSeg();
+        return true;
+      },
+      steps: function () { return run.steps; },
+      output: function () { return run.out.map(function (u) { return model.nodes[u].label; }); },
+      sizes: function () { return run.sizes.slice(); },
+      nodes: function () { return model.nodes; },
+      model: function () { return model; },
+      maxStackDepth: function () {
+        var m = 0;
+        for (var i = 0; i < run.steps.length; i++) m = Math.max(m, run.steps[i].stack.length);
+        return m;
+      },
+      goto: function (i) { play.goto(i); },
+      layout: function () { return L(); }
     };
   });
 })();
