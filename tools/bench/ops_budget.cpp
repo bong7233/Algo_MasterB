@@ -40,8 +40,13 @@ static double bench(F f) {
     return median3(t[0], t[1], t[2]);
 }
 
-static void report(const char* name, long long n, double el) {
-    printf("%-30s %12lld %8.3f %9.2f %16.0f\n", name, n, el, el / n * 1e9, n / el);
+// 측정한 단가를 예산 역산에 그대로 물려주기 위해 남겨 둔다.
+static double g_best_ns = 0, g_worst_ns = 0;
+
+static double report(const char* name, long long n, double el) {
+    double ns = el / n * 1e9;
+    printf("%-30s %12lld %8.3f %9.2f %16.0f\n", name, n, el, ns, n / el);
+    return ns;
 }
 
 // 함수 호출 비용을 재려면 인라인을 막아야 한다. 인라인되면 호출이 0회다.
@@ -62,7 +67,7 @@ int main() {
             for (size_t i = 0; i < a.size(); ++i) s += a[i];
             return s;
         });
-        report("연속 접근 s += a[i]", N, el);
+        g_best_ns = report("연속 접근 s += a[i]", N, el);
     }
     {  // 무작위 접근
         mt19937 rng(1);
@@ -73,7 +78,7 @@ int main() {
             for (size_t i = 0; i < idx.size(); ++i) s += a[idx[i]];
             return s;
         });
-        report("무작위 접근 s += a[idx[i]]", N, el);
+        g_worst_ns = report("무작위 접근 s += a[idx[i]]", N, el);
     }
     {  // 해시맵 조회
         const long long nd = 2000000;
@@ -135,6 +140,37 @@ int main() {
         double el = median3(t[0], t[1], t[2]);
         double units = (double)n * log2((double)n);
         printf("  n=%9lld  sort=%7.3fs  n·log2 n=%13.0f  %15.0f 단위/s\n", n, el, units, units / el);
+    }
+
+    printf("\n=== 1초 예산 역산: 이 비용이면 N 이 얼마까지 되는가 ===\n");
+    {
+        // 단가를 하나로 정할 수 없다는 것이 이 챕터의 요점이다. 그래서 두 개를 쓴다.
+        //   최선 = 연속 접근, 최악 = 무작위 접근. 방금 잰 값을 그대로 쓴다.
+        double best_ns = g_best_ns, worst_ns = g_worst_ns;
+        double b_best = 1e9 / best_ns, b_worst = 1e9 / worst_ns;
+        printf("  최선 단가 = 연속 접근 %.2f ns  -> 1초에 %.0f 연산\n", best_ns, b_best);
+        printf("  최악 단가 = 무작위 접근 %.2f ns  -> 1초에 %.0f 연산\n", worst_ns, b_worst);
+        struct Row { const char* label; double (*f)(double); };
+        Row rows[] = {
+            {"O(n)", [](double n) { return n; }},
+            {"O(n log n)", [](double n) { return n * log2(n < 2 ? 2 : n); }},
+            {"O(n^2)", [](double n) { return n * n; }},
+            {"O(n^3)", [](double n) { return n * n * n; }},
+            {"O(2^n)", [](double n) { return pow(2.0, n); }},
+            {"O(n!)", [](double n) { return tgamma(n + 1); }},
+        };
+        auto max_n = [](double (*f)(double), double budget) {
+            long long lo = 1, hi = 1;
+            while (f((double)hi) < budget && hi < 10000000000LL) hi *= 2;
+            while (lo < hi) {
+                long long mid = (lo + hi + 1) / 2;
+                if (f((double)mid) <= budget) lo = mid; else hi = mid - 1;
+            }
+            return lo;
+        };
+        printf("  %-12s %16s %16s\n", "복잡도", "최대 N (최선)", "최대 N (최악)");
+        for (auto& r : rows)
+            printf("  %-12s %16lld %16lld\n", r.label, max_n(r.f, b_best), max_n(r.f, b_worst));
     }
 
     // --- 컴파일러가 루프를 지우는 현상 ------------------------------------

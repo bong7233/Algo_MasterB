@@ -139,21 +139,23 @@ def main():
         print(f"  n={n:>9,}  sort={el:7.3f}s  n·log2 n={units:>13,.0f}  {units / el:>15,.0f} 단위/s")
 
     print("\n=== 1초 예산 역산: 이 비용이면 N 이 얼마까지 되는가 ===")
-    # 기준 단가는 "연속 접근" 한 바퀴로 잡는다. 가장 유리한 경우다.
-    base_ns = rows[0][2] / rows[0][1] * 1e9
-    print(f"  기준 단가 = 연속 접근 1회 = {base_ns:.1f} ns")
-    budget = 1.0 / (base_ns * 1e-9)  # 1초에 가능한 연산 수
-    print(f"  1초 예산 = {budget:,.0f} 연산")
-    for label, f in (
+    # 단가를 하나로 정할 수 없다는 것이 이 챕터의 요점이다. 그래서 두 개를 쓴다.
+    #   최선 = 연속 접근 (캐시가 최대로 먹히는 안쪽 루프)
+    #   최악 = 무작위 접근 (포인터를 따라다니는 안쪽 루프)
+    best_ns = rows[0][2] / rows[0][1] * 1e9
+    worst_ns = rows[1][2] / rows[1][1] * 1e9
+    forms = (
         ("O(n)", lambda n: n),
         ("O(n log n)", lambda n: n * math.log2(max(n, 2))),
         ("O(n^2)", lambda n: n * n),
         ("O(n^3)", lambda n: n * n * n),
         ("O(2^n)", lambda n: 2.0**n),
         ("O(n!)", lambda n: math.gamma(n + 1)),
-    ):
+    )
+
+    def max_n(f, budget):
         lo, hi = 1, 1
-        while f(hi) < budget and hi < 10**9:
+        while f(hi) < budget and hi < 10**10:
             hi *= 2
         while lo < hi:
             mid = (lo + hi + 1) // 2
@@ -161,7 +163,14 @@ def main():
                 lo = mid
             else:
                 hi = mid - 1
-        print(f"  {label:<12} 최대 N ≈ {lo:,}")
+        return lo
+
+    b_best, b_worst = 1e9 / best_ns, 1e9 / worst_ns
+    print(f"  최선 단가 = 연속 접근 {best_ns:.1f} ns  -> 1초에 {b_best:,.0f} 연산")
+    print(f"  최악 단가 = 무작위 접근 {worst_ns:.1f} ns  -> 1초에 {b_worst:,.0f} 연산")
+    print(f"  {'복잡도':<12} {'최대 N (최선)':>16} {'최대 N (최악)':>16}")
+    for label, f in forms:
+        print(f"  {label:<12} {max_n(f, b_best):>16,} {max_n(f, b_worst):>16,}")
 
 
 if __name__ == "__main__":

@@ -63,7 +63,10 @@ def mul_cost(loops: int = 200_000) -> None:
 
 
 def str_conversion() -> None:
-    print("\n큰 수를 문자열로 바꾸기 (10진 변환은 제곱 비용이다)")
+    # 2진 -> 10진 변환은 진법이 서로의 거듭제곱이 아니라 자릿수 전체를 건드린다.
+    # 교과서적 알고리즘은 O(d^2) 이고, 그래서 3.11 이 자릿수 제한을 도입했다.
+    # 다만 아래 실측이 보이듯 3.13 의 실제 증가율은 제곱보다 훨씬 완만하다.
+    print("\n큰 수를 문자열로 바꾸기")
     print(f"  기본 자릿수 제한: {sys.get_int_max_str_digits()}  <- 넘기면 ValueError")
     try:
         str(2**100_000)
