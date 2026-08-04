@@ -1,8 +1,3 @@
-/* 자동 생성 파일 — 직접 고치지 말 것. `python build.py` 로 다시 만든다. */
-/* 원본: assets/widgets/*.js */
-window.Widgets = window.Widgets || {};
-
-/* ==== _runtime.js ==== */
 /* _runtime.js — 위젯 공용 런타임
  *
  * 모든 위젯이 똑같이 필요로 하는 것을 한 곳에 모은다: 껍데기 DOM, 스텝 재생
