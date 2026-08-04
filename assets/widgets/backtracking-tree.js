@@ -348,11 +348,11 @@
     var nodes = [], calls = 0, bases = 0, moves = 0, truncated = false;
     var PEG = ['A', 'B', 'C'];
 
-    function add(parent, depth, kind, text, say, cv) {
+    function add(parent, depth, kind, text, say, cv, arrow) {
       if (nodes.length >= drawCap) { truncated = true; return -1; }
       nodes.push({
         p: parent, d: depth, kind: kind, txt: text, say: say, cv: cv,
-        wrow: -1, skip: 0, kids: [], slot: 0, x: 0, y: 0
+        wrow: -1, skip: 0, kids: [], slot: 0, x: 0, y: 0, arrow: arrow
       });
       if (parent >= 0) nodes[parent].kids.push(nodes.length - 1);
       return nodes.length - 1;
@@ -366,14 +366,14 @@
         bases++;
         var bid = add(parent, depth, 'base', '0',
           'hanoi(0, ' + arrow + ') — 기저 조건. 원반이 없으니 아무 일도 하지 않고 그대로 돌아간다. ' +
-          '여기가 재귀가 멈추는 자리다.', k);
+          '여기가 재귀가 멈추는 자리다.', k, arrow);
         return bid;
       }
       moves++;
       var id = add(parent, depth, 'ok', tag,
         'hanoi(' + k + ', ' + arrow + ') 호출. 맨 아래 원반 ' + k + ' 를 ' + PEG[to] + ' 로 보내려면 ' +
         '위 ' + (k - 1) + '개가 먼저 ' + PEG[via] + ' 로 비켜나야 한다 — 그것이 왼쪽 자식이다. ' +
-        '비켜났다고 믿고 원반 ' + k + ' 를 옮긴 뒤, 오른쪽 자식이 그 ' + (k - 1) + '개를 ' + PEG[to] + ' 로 옮긴다.', k);
+        '비켜났다고 믿고 원반 ' + k + ' 를 옮긴 뒤, 오른쪽 자식이 그 ' + (k - 1) + '개를 ' + PEG[to] + ' 로 옮긴다.', k, arrow);
       rec(id, depth + 1, k - 1, from, via, to);
       rec(id, depth + 1, k - 1, via, to, from);
       return id;
@@ -508,7 +508,8 @@
         if (nd.d > m.maxDepth) m.maxDepth = nd.d;
         m.cVis[i + 1] = m.cVis[i] + (nd.kind === 'cut' ? 0 : 1);
         m.cCut[i + 1] = m.cCut[i] + (nd.kind === 'cut' ? 1 : 0);
-        m.cSol[i + 1] = m.cSol[i] + (nd.kind === 'sol' ? 1 : 0);
+        // 하노이의 기저 호출(base)은 "여기서 멈춘다"는 뜻이라 해와 같은 칸에 센다.
+        m.cSol[i + 1] = m.cSol[i] + ((nd.kind === 'sol' || nd.kind === 'base') ? 1 : 0);
       }
       m.total = m.visited + m.pruned;
       model = m;
@@ -686,15 +687,19 @@
 
     function drawHeader(ctx, T, L) {
       var w = L.w, pad = 8;
-      var vis = model.cVis[Math.min(cur, model.nodes.length)];
-      var cut = model.cCut[Math.min(cur, model.nodes.length)];
-      var sol = model.cSol[Math.min(cur, model.nodes.length)];
+      // 스텝 i 에서는 노드 0..i 까지가 드러나 있다. 누적 배열은 [i+1] 이 그 값이다.
+      var upto = Math.min(cur + 1, model.nodes.length);
+      var vis = model.cVis[upto];
+      var cut = model.cCut[upto];
+      var sol = model.cSol[upto];
       var done = cur >= model.nodes.length && !model.truncated;
 
       if (problem === 'hanoi') {
-        var hw = Math.min(360, w - pad * 2);
-        statPanel(ctx, T, pad, 6, hw, 62, '호출 트리 (가지치기 없음)', [
-          ['호출', comma(vis)], ['기저 h0', comma(sol)], ['옮긴 원반', comma(model.moves)]
+        var hw = Math.min(380, w - pad * 2);
+        statPanel(ctx, T, pad, 6, hw, L.compact ? 26 : 62, '호출 트리 (가지치기 없음)', [
+          ['호출', comma(vis) + (done ? '' : ' / ' + comma(model.visited))],
+          ['기저 h0', comma(sol)],
+          ['옮긴 원반', comma(vis - sol)]
         ], true, L.compact);
         thesis(ctx, T, L, '호출 ' + comma(model.visited) + '개 = 2^' + (n + 1) + ' − 1. ' +
                '원반이 하나 늘 때마다 호출이 두 배가 된다 — 원반 20개면 100만 번이다. ' +
@@ -821,7 +826,16 @@
       ctx.lineWidth = 1;
 
       // ② 유령 삼각형 — 잘려서 펼치지 않은 부분트리
-      var labelRight = -1e9;   // 잎 개수 라벨이 서로 겹치면 둘 다 못 읽는다
+      /* 잎 개수 라벨이 서로 겹치면 둘 다 못 읽는다. 노드는 DFS 순서로 도므로
+       * x 가 단조가 아니다 — 이미 찍은 구간을 모아 두고 겹치면 건너뛴다. */
+      var taken = [];
+      function freeAt(x0, x1) {
+        for (var t = 0; t < taken.length; t += 2) {
+          if (x0 < taken[t + 1] && x1 > taken[t]) return false;
+        }
+        taken.push(x0, x1);
+        return true;
+      }
       if (L.r >= 2) {
         for (var g = 0; g <= shown; g++) {
           var cn = nodes[g];
@@ -845,10 +859,9 @@
             var lab2 = '×' + comma(cn.skip);
             ctx.font = '9px ' + FONT;
             var lw = ctx.measureText(lab2).width;
-            if (cn.x - lw / 2 > labelRight + 4) {
+            if (freeAt(cn.x - lw / 2 - 3, cn.x + lw / 2 + 3)) {
               ctx.globalAlpha = 0.85;
               text(ctx, lab2, cn.x, bottomY + 1, '9px ' + FONT, T.fgFaint, 'center');
-              labelRight = cn.x + lw / 2;
             }
           }
         }
@@ -1082,8 +1095,8 @@
       for (var i = 0; i < path.length && i < 8; i++) {
         ty += 16;
         var p = path[i];
-        text(ctx, '└ ' + (p.kind === 'base' ? 'hanoi(0)' : 'hanoi(' + p.cv + ')'),
-             x + 10 + (i + 1) * 8, ty, '11px ' + FONT,
+        text(ctx, '└ hanoi(' + p.cv + ', ' + (p.arrow || '') + ')',
+             x + 10 + (i + 1) * 7, ty, '11px ' + FONT,
              p.kind === 'base' ? T.wPath : (i === path.length - 1 ? T.accent : T.fgFaint));
       }
       ty += 24;
