@@ -67,5 +67,25 @@ int main() {
         sink = (int)d.size();
     });
     printf("mutex + 매번 통지     중앙값 %.3f초  왕복당 %.1f ns\n", c, c / N * 1e9);
+
+    // 통지 자체의 값만 떼어 본다. 락 왕복 수를 b 와 같게 두고 notify 만 더한다.
+    // 대기자가 하나도 없을 때도 조건변수를 건드리는 값이 있는가를 보는 것이다.
+    double e = med_of([&] {
+        for (int i = 0; i < N; i++) {
+            { lock_guard<mutex> g(mu); d.push_back(1); d.pop_back(); }
+            cv.notify_one();
+        }
+        sink = (int)d.size();
+    });
+    printf("mutex + notify_one   중앙값 %.3f초  왕복당 %.1f ns (대기자 없음)\n", e, e / N * 1e9);
+
+    double f = med_of([&] {
+        for (int i = 0; i < N; i++) {
+            { lock_guard<mutex> g(mu); d.push_back(1); d.pop_back(); }
+            cv.notify_all();
+        }
+        sink = (int)d.size();
+    });
+    printf("mutex + notify_all   중앙값 %.3f초  왕복당 %.1f ns (대기자 없음)\n", f, f / N * 1e9);
     return 0;
 }
