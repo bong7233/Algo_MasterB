@@ -74,6 +74,21 @@ def chain_brute(d: list[int]) -> tuple[int, int]:
     return go(1, len(d) - 1), calls[0]
 
 
+def greedy_cheapest(d: list[int]) -> int:
+    """가장 싼 인접 쌍부터 합친다 — 구간 DP 자리에서 가장 먼저 떠오르는 그리디."""
+    d = list(d)
+    tot = 0
+    while len(d) > 2:
+        best, bi = None, 1
+        for i in range(1, len(d) - 1):
+            c = d[i - 1] * d[i] * d[i + 1]
+            if best is None or c < best:
+                best, bi = c, i
+        tot += best
+        d.pop(bi)
+    return tot
+
+
 def catalan(m: int) -> int:
     return math.comb(2 * m, m) // (m + 1)
 
@@ -114,7 +129,19 @@ def main() -> None:
     bad = chain_row_major(d)
     print("    dims=%s  길이 순 %d  행 우선 %d" % (d, ok, bad))
 
-    print("[4] 무작위 대조 — 길이 순 DP vs 완전탐색 (n=2..8, 300회)")
+    print("[4] 그리디(가장 싼 인접 쌍부터)가 최적을 놓치는 비율")
+    r3 = random.Random(20250805)
+    lost = 0
+    for _ in range(400):
+        n = r3.randint(3, 7)
+        dd = [r3.randint(1, 50) for _ in range(n + 1)]
+        if greedy_cheapest(dd) > chain_dp(dd)[0]:
+            lost += 1
+    print("    400회 중 %d회(%.1f%%) 에서 그리디가 진다" % (lost, lost * 100 / 400))
+    d2 = [10, 100, 5, 50, 20]
+    print("    dims=%s  그리디 %d  최적 %d" % (d2, greedy_cheapest(d2), chain_dp(d2)[0]))
+
+    print("[5] 무작위 대조 — 길이 순 DP vs 완전탐색 (n=2..8, 300회)")
     bad_cnt = 0
     for t in range(300):
         n = rng.randint(2, 8)
@@ -126,7 +153,7 @@ def main() -> None:
             print("    불일치! dims=%s dp=%s brute=%s" % (d, a, b))
     print("    불일치 %d건 / 300건" % bad_cnt)
 
-    print("[5] 무작위 대조 — 행 우선 DP vs 완전탐색 (같은 300회)")
+    print("[6] 무작위 대조 — 행 우선 DP vs 완전탐색 (300회)")
     rng2 = random.Random(20250805 + 1)
     wrong = 0
     for t in range(300):
