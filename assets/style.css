@@ -2088,3 +2088,43 @@ body.modal-open { overflow: hidden; }
   .wk-text { width: 8em; }
   .wk-num { width: 3.6em; }
 }
+
+/* ---- 용어 사전 (§8) ---- */
+.glossary { max-width: 62ch; }
+.glossary h1 { margin-bottom: .4em; }
+.glossary-lead { color: var(--fg-dim); font-size: .92rem; margin-bottom: 1.2em; }
+#glossary-filter {
+  width: 100%;
+  font: inherit;
+  font-size: .92rem;
+  padding: 8px 11px;
+  color: var(--fg);
+  background: var(--bg-code);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+#glossary-filter:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-color: var(--accent); }
+.glossary-count { color: var(--fg-faint); font-size: .8rem; margin: .5em 0 0; min-height: 1.2em; }
+.glossary-list { margin: 1em 0 0; }
+.glossary-item { padding: .85em 0; border-top: 1px solid var(--border); }
+.glossary-item[hidden] { display: none; }
+.glossary-item dt { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin: 0; }
+.glossary-term { font-weight: 700; font-size: 1rem; }
+.glossary-en { color: var(--fg-faint); font-size: .82rem; font-family: var(--font-mono); }
+.glossary-ch {
+  margin-left: auto;
+  flex: none;
+  font-size: .76rem;
+  font-family: var(--font-mono);
+  color: var(--accent);
+  text-decoration: none;
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+.glossary-ch:hover { border-color: var(--accent); }
+.glossary-item dd { margin: .45em 0 0; color: var(--fg-dim); font-size: .93rem; line-height: 1.7; }
+
+@media (max-width: 699.98px) {
+  .glossary-ch { margin-left: 0; }
+}
