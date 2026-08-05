@@ -2,11 +2,15 @@
 """VIII-4 의 수치와 정확성 검증 — 2차원 DP.
 
 무엇을 재는가
-    1. 격자 경로 수: DP 와 경로 완전열거의 일치 (벽 있는 경우 포함)
+    1. 격자 경로 수: DP 와 경로 완전열거의 일치(벽 있는 경우 포함)와 시간 차
     2. 편집 거리: DP 와 메모 없는 재귀의 일치, 그리고 복원한 연산 열이
        실제로 A 를 B 로 만드는가 (값만 맞고 복원이 틀리는 버그를 잡는다)
     3. 전체 표판과 두 줄 롤링판의 시간·메모리
     4. 무작위 대조 (M7 부칙 §7)
+
+시간과 메모리를 **따로** 잰다. tracemalloc 은 모든 할당을 추적하므로 켜 둔 채
+시간을 재면 열 배 넘게 부풀어 본문에 못 쓸 값이 나온다. 시간은 tracemalloc 없이
+3회 재고 중앙값을, 메모리는 별도 패스에서 최대 추적량을 쓴다.
 
 측정 환경은 CLAUDE.md §1-3 고정. 실행:
     python3.13 tools/bench/viii4_2d_dp.py
@@ -15,9 +19,28 @@
 from __future__ import annotations
 
 import random
+import statistics
 import sys
 import time
 import tracemalloc
+
+
+def timed(fn, *args, repeat: int = 3):
+    out = None
+    ts = []
+    for _ in range(repeat):
+        t0 = time.perf_counter()
+        out = fn(*args)
+        ts.append(time.perf_counter() - t0)
+    return out, statistics.median(ts)
+
+
+def peak_mb(fn, *args) -> float:
+    tracemalloc.start()
+    fn(*args)
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    return peak / 1024 / 1024
 
 
 # ------------------------------------------------------------- 격자 경로 수
@@ -66,6 +89,10 @@ def edit_dp(a: str, b: str) -> tuple[int, list[list[int]]]:
             else:
                 dp[i][j] = 1 + min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1])
     return dp[n][m], dp
+
+
+def edit_dp_value(a: str, b: str) -> int:
+    return edit_dp(a, b)[0]
 
 
 def edit_rolling(a: str, b: str) -> int:
@@ -154,6 +181,13 @@ def main() -> None:
           f" 열거={grid_paths_enumerate(5, 6, {(1,2),(2,4)})}")
     print(f"    벽 없는 5×6: DP={grid_paths_dp(5, 6, set())} (C(9,4)=126)")
 
+    print("\n[1-1] 격자가 커지면 — 완전열거 vs DP (벽 없음, 정사각 격자)")
+    for k in (10, 12, 14, 16):
+        _, t_dp = timed(grid_paths_dp, k, k, set())
+        ans, t_en = timed(grid_paths_enumerate, k, k, set(), repeat=1)
+        print(f"    {k}×{k}  경로 {ans:>12,}개   완전열거 {t_en*1000:9.1f} ms"
+              f"   DP {t_dp*1000:7.3f} ms  ({t_en/t_dp:,.0f}배)")
+
     print("\n[2] 편집 거리 — DP vs 완전탐색 재귀 vs 롤링, 그리고 복원 검증")
     bad = 0
     alphabet = "abcd"
@@ -176,40 +210,27 @@ def main() -> None:
         ops = edit_ops(a, b, dp)
         print(f"    {a!r} -> {b!r} : 거리 {d}, 연산 {ops}, 적용 결과 {apply_ops(a, ops)!r}")
 
-    print("\n[3] 전체 표 vs 두 줄 롤링 (문자열 길이 3000×3000)")
-    n = 3000
+    print("\n[3] 전체 표 vs 두 줄 롤링 (문자열 길이 2000×2000 = 400만 칸)")
+    n = 2000
     a = "".join(random.choice("abcdefgh") for _ in range(n))
     b = "".join(random.choice("abcdefgh") for _ in range(n))
 
-    tracemalloc.start()
-    t0 = time.perf_counter()
-    d_full, _dp = edit_dp(a, b)
-    t_full = time.perf_counter() - t0
-    _, peak_full = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
-    del _dp
-
-    tracemalloc.start()
-    t0 = time.perf_counter()
-    d_roll = edit_rolling(a, b)
-    t_roll = time.perf_counter() - t0
-    _, peak_roll = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
-
+    d_full, t_full = timed(edit_dp_value, a, b)
+    d_roll, t_roll = timed(edit_rolling, a, b)
     assert d_full == d_roll
+    m_full = peak_mb(edit_dp_value, a, b)
+    m_roll = peak_mb(edit_rolling, a, b)
     print(f"    거리 {d_full} (두 판 일치)")
-    print(f"    전체 표 {t_full*1000:9.1f} ms  최대 메모리 {peak_full/1024/1024:8.2f} MB")
-    print(f"    두 줄   {t_roll*1000:9.1f} ms  최대 메모리 {peak_roll/1024/1024:8.2f} MB")
-    print(f"    메모리 비 {peak_full / max(peak_roll, 1):.0f}배")
+    print(f"    전체 표 {t_full*1000:9.1f} ms  최대 추적 메모리 {m_full:8.2f} MB")
+    print(f"    두 줄   {t_roll*1000:9.1f} ms  최대 추적 메모리 {m_roll:8.2f} MB")
+    print(f"    메모리 비 {m_full / max(m_roll, 1e-9):.0f}배")
 
-    print("\n[4] 완전탐색 재귀가 언제 죽는가 (편집 거리, 같은 길이 문자열)")
-    for k in (6, 8, 10, 12):
+    print("\n[4] 완전탐색 재귀가 언제 죽는가 (편집 거리, 겹치는 글자가 없는 두 문자열)")
+    for k in (6, 8, 10, 11):
         a = "a" * k
         b = "b" * k
-        t0 = time.perf_counter()
-        edit_brute(a, b)
-        el = time.perf_counter() - t0
-        print(f"    길이 {k:>3} : {el*1000:9.1f} ms")
+        _, el = timed(edit_brute, a, b, repeat=1)
+        print(f"    길이 {k:>3} : {el*1000:9.1f} ms   (표는 {(k+1)*(k+1):>4}칸뿐이다)")
 
 
 if __name__ == "__main__":

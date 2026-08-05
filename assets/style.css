@@ -2060,6 +2060,22 @@ body.modal-open { overflow: hidden; }
 .wk-seg-btn:hover { color: var(--fg); }
 .wk-seg-btn.is-active { color: var(--accent-fg); background: var(--accent); font-weight: 700; }
 
+/* ---- 인라인 입력: 위젯 파라미터를 독자가 직접 바꾼다 ---- */
+.wk-field { display: inline-flex; align-items: center; gap: 5px; font-size: .74rem; color: var(--fg-faint); }
+.wk-num, .wk-text {
+  font: inherit;
+  font-family: var(--font-mono);
+  font-size: .74rem;
+  padding: 4px 6px;
+  color: var(--fg);
+  background: var(--bg-code);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+.wk-num { width: 4.5em; }
+.wk-text { width: 12em; }
+.wk-num:focus, .wk-text:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-color: var(--accent); }
+
 /* ---- 범례: 색이 무엇을 뜻하는지 ---- */
 .wk-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: .74rem; color: var(--fg-faint); }
 .wk-legend span { display: inline-flex; align-items: center; gap: 5px; }
@@ -2069,4 +2085,6 @@ body.modal-open { overflow: hidden; }
   .wk-count { min-width: 0; font-size: .72rem; }
   .wk-range { flex-basis: 60px; }
   .wk-title { font-size: .78rem; }
+  .wk-text { width: 8em; }
+  .wk-num { width: 3.6em; }
 }

@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <numeric>
 #include <random>
+#include <sys/resource.h>
 #include <vector>
 using namespace std;
 
@@ -81,11 +82,17 @@ int main() {
         printf("%2d | %11.4f | %11.4f | %s (%d)\n", n, tb, td, b == d ? "yes" : "NO", b);
     }
     printf("\n");
-    for (int n : {16, 18, 20}) {
+    printf("  n | states (2^n x n) | table (MB) | peak RSS (MB) | bitmask(sec)\n");
+    printf("----|------------------|------------|---------------|-------------\n");
+    for (int n : {16, 18, 20, 22, 24}) {
         auto c = make_cost(n);
         int d = 0;
         double td = timed(bitmask, c, 1, d);
-        printf("n=%2d bitmask=%8.3f sec  states %d  ans %d\n", n, td, (1 << n) * n, d);
+        double states = (double)(1LL << n) * n;
+        rusage ru;
+        getrusage(RUSAGE_SELF, &ru);
+        printf("%3d | %16.0f | %10.1f | %13.1f | %12.3f\n", n, states,
+               states * sizeof(int) / 1048576.0, ru.ru_maxrss / 1024.0, td);
     }
     return 0;
 }

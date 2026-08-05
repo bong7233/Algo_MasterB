@@ -77,7 +77,50 @@ def timed(fn, arg, reps=3):
     return out, statistics.median(ts)
 
 
+def verify(trials: int = 300) -> bool:
+    """무작위 비용 행렬에서 순열 완전탐색과 비트마스크 DP 를 대조한다.
+
+    DP 는 답을 독립으로 검증할 수 있다. 작은 n 에서 완전탐색과 어긋나면
+    점화식이나 초기값이 틀린 것이지 성능 문제가 아니다.
+    """
+    rnd = random.Random(2024)
+    for t in range(trials):
+        n = rnd.randint(2, 8)
+        cost = [[0] * n for _ in range(n)]
+        for i in range(n):
+            for j in range(n):
+                if i != j:
+                    cost[i][j] = rnd.randint(1, 50)
+        b, d = brute(cost), bitmask(cost)
+        if b != d:
+            print(f"불일치 t={t} n={n} brute={b} bitmask={d}")
+            for row in cost:
+                print("   ", row)
+            return False
+    print(f"정확성: 무작위 {trials}건(n=2..8, 비대칭 비용)에서 완전탐색 == 비트마스크 DP")
+    return True
+
+
+def memory_table() -> None:
+    """DP 표가 실제로 잡는 메모리. n 이 1 늘면 2배가 조금 넘는다."""
+    import tracemalloc
+
+    print("  n | 상태 수 (2^n x n) | 표 메모리(Python)")
+    print("----|-------------------|------------------")
+    for n in (12, 16, 18):
+        cost = make_cost(n)
+        tracemalloc.start()
+        bitmask(cost)
+        _, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        print(f" {n:2d} | {(1 << n) * n:17,} | {peak / 1024 / 1024:14.1f} MB")
+
+
 def main() -> int:
+    if not verify():
+        return 1
+    print()
+
     print("n  | brute(초)   | bitmask(초) | 답 일치")
     print("---|-------------|-------------|--------")
     for n in (9, 10, 11, 12):
@@ -92,6 +135,9 @@ def main() -> int:
         d, td = timed(bitmask, cost, reps=1)
         states = (1 << n) * n
         print(f"n={n:2d} bitmask={td:8.3f}초  상태 {states:,}개  답 {d}")
+
+    print()
+    memory_table()
     return 0
 
 
