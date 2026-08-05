@@ -36,6 +36,7 @@ if sys.stdout is not None and hasattr(sys.stdout, "reconfigure"):
 ROOT = Path(__file__).resolve().parent
 CONTENT = ROOT / "content"
 TOC_PATH = CONTENT / "toc.json"
+GLOSSARY_PATH = CONTENT / "glossary.json"
 OUT = ROOT / "assets" / "bundle.js"
 WIDGET_DIR = ROOT / "assets" / "widgets"
 WIDGET_OUT = ROOT / "assets" / "widgets.bundle.js"
@@ -271,6 +272,35 @@ def word_count(md: str) -> int:
     return len(re.sub(r"\s+", "", body))
 
 
+def load_glossary() -> list[dict]:
+    """용어 사전을 목록으로 편다. 사전 파일은 이름을 키로 쓰지만 앱은 정렬된 배열이 편하다.
+
+    가나다 → 알파벳 순으로 정렬한다. 한글과 영문이 섞여 있어 기본 정렬에 맡기면
+    영문이 앞으로 나오는데, 이 책의 용어는 대부분 한글이라 그 편이 찾기 나쁘다.
+    """
+    if not GLOSSARY_PATH.exists():
+        return []
+    raw = json.loads(GLOSSARY_PATH.read_text(encoding="utf-8"))
+    items = []
+    for key, v in raw.items():
+        items.append({
+            "term": v.get("term", key),
+            "en": v.get("en", ""),
+            "def": v.get("def", ""),
+            "chapter": v.get("chapter", ""),
+            "aliases": v.get("aliases", []),
+        })
+
+    def sort_key(it: dict) -> tuple[int, str]:
+        t = it["term"]
+        # 한글이 먼저, 그다음 나머지. ord 경계는 한글 음절 블록이다.
+        hangul = bool(t) and "\uac00" <= t[0] <= "\ud7a3"
+        return (0 if hangul else 1, t)
+
+    items.sort(key=sort_key)
+    return items
+
+
 def load_toc() -> dict:
     if not TOC_PATH.exists():
         raise SystemExit(f"[에러] {TOC_PATH.relative_to(ROOT)} 가 없습니다.")
@@ -313,6 +343,8 @@ def build() -> dict:
             if not p.name.startswith("_"):
                 print(f"[경고] 목차에 없는 파일: {p.relative_to(ROOT)}")
 
+    glossary = load_glossary()
+
     payload = {
         "meta": toc["meta"],
         "toc": [
@@ -327,6 +359,10 @@ def build() -> dict:
         ],
         "docs": docs,
         "classify": classify,
+        # 용어 사전(§8). 항목마다 최초 정의 챕터가 붙어 있어 클릭하면 그리로 간다.
+        # 본문에서 처음 만났을 때 배우는 것이 기본 경로이고(§4-3), 이 페이지는
+        # 돌아와서 찾는 곳이다.
+        "glossary": glossary,
     }
 
     OUT.parent.mkdir(parents=True, exist_ok=True)

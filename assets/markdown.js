@@ -6,6 +6,7 @@
  *
  *   window.MD.render(md)   -> HTML 문자열 (순수 함수, DOM 접근 없음)
  *   window.MD.headings(md) -> [{ level, text, id }]  (최상위 h2·h3만)
+ *   window.MD.inline(src)  -> HTML 문자열 (한 줄용. 블록 문법을 타지 않는다)
  */
 (function (global) {
   'use strict';
@@ -763,5 +764,5 @@
     return out;
   }
 
-  global.MD = { render: render, headings: headings };
+  global.MD = { render: render, headings: headings, inline: inline };
 })(typeof window !== 'undefined' ? window : this);

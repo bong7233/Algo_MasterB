@@ -474,6 +474,7 @@
     var doc = $('#doc');
 
     if (!id) { renderHome(); return; }
+    if (id === 'glossary') { renderGlossary(); return; }
 
     var meta = CH[id];
     if (!meta) {
@@ -567,6 +568,68 @@
 
     var hr = $('#home-review');
     if (hr) hr.addEventListener('click', openReview);
+    window.scrollTo(0, 0);
+  }
+
+  /* 용어 사전 (§8) — 가나다/알파벳 목록, 클릭하면 최초 정의 챕터로 간다.
+   *
+   * 왜 검색 상자를 페이지 안에 두는가
+   *   306개를 눈으로 훑는 것은 사전이 아니라 목록이다. 그리고 독자가 찾는 단서는
+   *   한글 이름일 때도 영문 이름일 때도 있어서(`upper_bound` 를 "상계" 로 기억하지 않는다),
+   *   별칭까지 같이 걸어야 실제로 찾힌다.
+   */
+  function renderGlossary() {
+    var items = BOOK.glossary || [];
+    var doc = $('#doc');
+
+    var html = '<div class="glossary">';
+    html += '<h1>용어 사전</h1>';
+    html += '<p class="glossary-lead">' + items.length + '개. 각 항목은 그 용어를 <b>처음 정의한 절</b>로 이어진다. ' +
+            '본문에서 처음 만났을 때 배우는 것이 기본 경로이고, 여기는 돌아와서 찾는 곳이다.</p>';
+    html += '<input id="glossary-filter" type="search" placeholder="용어·영문·별칭으로 거르기" ' +
+            'aria-label="용어 거르기" autocomplete="off">';
+    html += '<p id="glossary-count" class="glossary-count" role="status" aria-live="polite"></p>';
+    html += '<dl id="glossary-list" class="glossary-list">';
+    items.forEach(function (it, i) {
+      var ch = CH[it.chapter];
+      html += '<div class="glossary-item" data-i="' + i + '">';
+      html += '<dt><span class="glossary-term">' + escapeHtml(it.term) + '</span>';
+      if (it.en) html += ' <span class="glossary-en">' + escapeHtml(it.en) + '</span>';
+      if (ch) {
+        html += '<a class="glossary-ch" href="#/' + escapeHtml(it.chapter) + '">' +
+                escapeHtml(ch.num) + '</a>';
+      }
+      html += '</dt>';
+      html += '<dd>' + MD.inline(it["def"]) + '</dd>';
+      html += '</div>';
+    });
+    html += '</dl></div>';
+
+    doc.innerHTML = html;
+    $('#inbook').innerHTML = '';
+    renderPager(null);
+    highlightCurrentToc('');
+    document.title = '용어 사전 · ' + ((BOOK.meta || {}).title || 'Algorithmic');
+
+    var input = $('#glossary-filter');
+    var nodes = doc.querySelectorAll('.glossary-item');
+    var count = $('#glossary-count');
+
+    function apply() {
+      var q = (input.value || '').trim().toLowerCase();
+      var shown = 0;
+      for (var i = 0; i < nodes.length; i++) {
+        var it = items[i];
+        var hay = (it.term + ' ' + it.en + ' ' + (it.aliases || []).join(' ')).toLowerCase();
+        var hit = !q || hay.indexOf(q) >= 0;
+        nodes[i].hidden = !hit;
+        if (hit) shown++;
+      }
+      count.textContent = q ? shown + ' / ' + items.length : '';
+    }
+
+    input.addEventListener('input', apply);
+    apply();
     window.scrollTo(0, 0);
   }
 
