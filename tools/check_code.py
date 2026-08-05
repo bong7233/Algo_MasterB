@@ -108,6 +108,47 @@ def has_diff_table(md: str, after_line: int, window: int = 90) -> bool:
     return "언어 차이" in chunk
 
 
+# 생략 표시가 있는 줄은 대조하지 않는다. 챕터가 긴 출력의 앞부분만 싣는 것은
+# 정당하고 흔하다("앞 9개" 식). 생략을 결함으로 세면 검사기가 시끄러워져 무시당한다.
+ELISION = re.compile(r"\.\.\.|…|\(생략\)|이하 생략")
+
+
+def next_console_block(md: str, after_line: int) -> tuple[int, list[str]] | None:
+    """dual 블록 뒤에 처음 나오는 ```console 블록. 다음 dual 이나 다음 절 제목 전까지만 본다.
+
+    본문이 싣는 출력과 실제 출력이 어긋나는 것은 독자가 절대 알아챌 수 없는 결함이다 —
+    코드는 돌고 두 언어도 일치하는데 지면의 숫자만 옛날 것인 경우가 실제로 나온다.
+    """
+    lines = md.split("\n")
+    i = after_line
+    while i < len(lines):
+        s = lines[i].strip()
+        if s == "::: dual" or s.startswith("## "):
+            return None
+        if s.startswith("```console"):
+            body: list[str] = []
+            i += 1
+            while i < len(lines) and not lines[i].startswith("```"):
+                body.append(lines[i])
+                i += 1
+            return (i, body)
+        i += 1
+    return None
+
+
+def console_mismatches(actual: str, shown: list[str]) -> list[str]:
+    """본문에 실린 줄 중 실제 출력에 없는 것. 순서는 보지 않고 존재만 본다."""
+    have = {ln.rstrip() for ln in actual.split("\n")}
+    missing = []
+    for ln in shown:
+        t = ln.rstrip()
+        if not t.strip() or ELISION.search(t):
+            continue
+        if t not in have:
+            missing.append(t)
+    return missing
+
+
 def run(cmd: list[str], *, timeout: int = 90) -> tuple[int, str]:
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
@@ -128,7 +169,7 @@ def main() -> int:
         targets = [t for t in targets if t.stem in args]
 
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="algobook-code-"))
-    total = ran = failed = undeclared = skipped = 0
+    total = ran = failed = undeclared = skipped = stale = 0
 
     for path in targets:
         rel = str(path.relative_to(ROOT))
@@ -153,7 +194,7 @@ def main() -> int:
                     print(f"{rel}:{line}: Python 실행 실패 (rc={rc})")
                     print("    " + out.strip().replace("\n", "\n    ")[:400])
                 else:
-                    outs["python"] = out.strip()
+                    outs["python"] = out.rstrip()
 
             cpp = blocks.get("cpp")
             if cpp and not NEEDS_STDIN.search(cpp):
@@ -173,26 +214,43 @@ def main() -> int:
                         print(f"{rel}:{line}: C++ 실행 실패 (rc={rc2})")
                         print("    " + out2.strip().replace("\n", "\n    ")[:400])
                     else:
-                        outs["cpp"] = out2.strip()
+                        outs["cpp"] = out2.rstrip()
 
+            declared = False
             if "python" in outs and "cpp" in outs and outs["python"] != outs["cpp"]:
                 if has_diff_table(md, line):
-                    continue  # 선언된 차이
-                undeclared += 1
-                print(f"{rel}:{line}: 두 언어 출력이 다른데 '언어 차이' 표가 없다")
-                print("    py : " + outs["python"].replace("\n", " / ")[:180])
-                print("    cpp: " + outs["cpp"].replace("\n", " / ")[:180])
+                    declared = True
+                else:
+                    undeclared += 1
+                    print(f"{rel}:{line}: 두 언어 출력이 다른데 '언어 차이' 표가 없다")
+                    print("    py : " + outs["python"].replace("\n", " / ")[:180])
+                    print("    cpp: " + outs["cpp"].replace("\n", " / ")[:180])
+
+            # 본문에 실린 출력과 실제 출력의 대조. 두 언어가 서로 일치하는 것만으로는
+            # 지면의 숫자가 최신이라는 보장이 되지 않는다.
+            actual = outs.get("python") or outs.get("cpp")
+            if actual and not declared:
+                found = next_console_block(md, line)
+                if found:
+                    cline, shown = found
+                    missing = console_mismatches(actual, shown)
+                    if missing:
+                        stale += 1
+                        print(f"{rel}:{cline}: 본문 console 블록에 실제 출력에 없는 줄이 있다")
+                        for m in missing[:4]:
+                            print("    실린 것: " + m[:150])
+                        print("    실제   : " + actual.replace("\n", " / ")[:200])
 
     print(
         f"\n::: dual {total}개 · 실행 {ran}회 · 실패 {failed} · "
-        f"선언 없는 불일치 {undeclared} · 건너뜀 {skipped}"
+        f"선언 없는 불일치 {undeclared} · 실린 출력 불일치 {stale} · 건너뜀 {skipped}"
     )
-    if failed == 0 and undeclared == 0:
+    if failed == 0 and undeclared == 0 and stale == 0:
         print("본문 코드 이상 없음.")
 
     if failed:
         return 1
-    if undeclared and strict:
+    if (undeclared or stale) and strict:
         return 1
     return 0
 
