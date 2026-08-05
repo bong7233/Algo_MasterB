@@ -57,47 +57,25 @@
 공유기 문제의 판정은 **"놓을 수 있으면 무조건 놓는다"** 이고, 증명 구조가 같다. 놓을 수 있는데 미뤄서 이득을 보는 경우가 없다 — 뒤에 놓을수록 그다음 후보가 줄어들 뿐이다.
 
 ::: widget binary-search-bounds {
-  "mode": "answer-space",
-  "problem": "강의 N개를 순서대로 M개 묶음에 나눠 담기 (최댓값을 최소화)",
-  "input": {"a": [1, 2, 3, 4, 5, 6, 7, 8, 9], "m": 3},
-  "domain": {"lo": "max(a)", "hi": "sum(a) + 1", "type": "int"},
+  "array": [0, 0, 0, 1, 1, 1, 1, 1, 1, 1],
+  "target": 1,
+  "predicate": "a[mid] >= target",
   "interval": "half-open",
-  "loop": "lo < hi",
-  "mid": "lo + (hi - lo) // 2",
-  "judge": {"kind": "greedy-partition",
-            "label": "넘치기 직전까지 담고 넘치면 새 묶음",
-            "cost": "O(N)",
-            "animate": ["cur", "count", "boundary"]},
-  "predicate": "judge(mid) <= m",
-  "predicateLabel": "mid 로 담긴다",
-  "update": {"true": "hi = mid", "false": "lo = mid + 1"},
-  "returns": "lo",
-  "columns": ["step", "lo", "hi", "width", "mid", "judge(mid)", "p(mid)", "update"],
+  "columns": ["step", "lo", "hi", "width", "mid", "a[mid]", "p(mid)", "update"],
   "show": {
-    "invariant": "답은 항상 [lo, hi) 안에 있다",
-    "measure": "width = hi - lo",
-    "judgePanel": "expanded",
-    "judgeSteps": true,
-    "callCounter": true,
-    "totalOps": "판정 호출 x N"
+    "invariant": "답은 항상 [lo, hi) 안에 있다 (칸 i = 후보 크기 x = i + 5)",
+    "measure": true,
+    "window": true,
+    "discarded": true
   },
-  "controls": {"step": true, "rewind": true, "stepInsideJudge": true,
-               "editInput": true, "editM": true},
-  "variants": [
-    {"id": "min-max", "label": "최댓값을 최소화 (묶음)",
-     "judge": {"kind": "greedy-partition"}, "returns": "lo"},
-    {"id": "max-min", "label": "최솟값을 최대화 (공유기)",
-     "input": {"a": [1, 2, 4, 8, 9], "c": 3},
-     "judge": {"kind": "greedy-place", "label": "놓을 수 있으면 무조건 놓는다"},
-     "predicate": "judge(mid) < c", "returns": "lo - 1"},
-    {"id": "bad-judge", "label": "판정을 근사로 바꾸면",
-     "judge": {"kind": "greedy-partition", "lookahead": false, "approx": true},
-     "expect": "wrong-answer"}
-  ]
+  "controls": {"step": true, "rewind": true},
+  "stallDetect": false
 }
 :::
 
-위젯은 두 층으로 나뉜다. 위층은 앞 챕터들과 같은 답 후보 구간이고, **아래층이 이 챕터의 새로운 부분이다** — `mid` 하나를 판정하는 그리디가 원소를 하나씩 담는 과정이 그대로 보인다. 현재 묶음의 합이 막대로 차오르다가 `x`를 넘는 순간 칸막이가 서고 묶음 번호가 하나 올라간다. 판정 안쪽까지 스텝으로 들어갈 수 있어서, 바깥 한 스텝이 안쪽 $N$스텝이라는 사실이 손으로 만져진다. 오른쪽 위에는 "판정 호출 수 × N"이 총 연산량으로 계속 갱신된다. 탭으로 최솟값을 최대화하는 공유기판과, 판정 그리디를 일부러 망가뜨린 판을 갈아 끼울 수 있다. 세 번째를 고르면 바깥 이분 탐색은 정확히 같은 모양으로 돌면서 **답만 틀린다.**
+[VII-3](#/vii-3) §2.1의 위젯과 같은 방식으로 읽는다. 한 칸이 후보 크기 하나이고, 칸에 적힌 값은 **그리디 판정 한 판의 결과**다. 축소한 예제 `a = [3, 1, 4, 1, 5]`, `m = 2`에 대해 후보 크기 $x = 5$부터 14까지를 늘어놓았다. 칸의 값 1은 술어 `p(x) = (groups_needed(x) <= 2)`가 **참**, 0은 거짓이다. 앞의 세 칸(크기 5, 6, 7)은 세 묶음이 필요해 거짓이고 넷째 칸부터 참이다. ==처음 참이 나오는 인덱스 3, 곧 크기 8이 답이다.==
+
+**칸 하나가 곧 그리디 한 판이라는 점이 이 챕터의 전부다.** 위젯이 네 스텝에 끝나 보이지만 그 네 번 각각이 원소 다섯 개를 훑는 루프이고, 회색으로 지워진 여섯 칸은 그리디를 **한 번도 돌리지 않고** 버린 후보다. 총 연산량은 칸 수가 아니라 **스텝 수 × 원소 수**다.
 
 ### 2.3 정당성이 두 겹이다
 

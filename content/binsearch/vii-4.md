@@ -59,41 +59,30 @@ while (hi-lo > 1e-9): 54회에서 폭이 1.280e+02 로 멈췄다. 조건 만족?
 
 $1.4 \times 10^9$ 근처에서 두 `double` 사이의 최소 간격이 이미 $2.4 \times 10^{-7}$이다. 폭이 이 값 밑으로 내려가려면 그 사이에 표현 가능한 수가 있어야 하는데 없다. ==`lo`와 `hi`가 이웃한 두 `double`이 되는 순간 `mid`는 둘 중 하나와 같아지고, 폭은 그 자리에서 굳는다.== 그 폭이 `EPS`보다 크면 루프는 끝나지 않는다.
 
+이 정지를 눈으로 보는 가장 값싼 방법은 **정수판의 같은 현상**을 보는 것이다. 정수 이분 탐색에서 `lo = mid + 1`의 `+1`을 빼면 폭이 1에서 굳고 루프가 끝나지 않는다([VII-1](#/vii-1) §2.2). 실수판에서 벌어지는 일은 그것과 정확히 같은 사건이고, **굳는 높이가 1이 아니라 ULP라는 것만 다르다.**
+
 ::: widget binary-search-bounds {
-  "mode": "real",
-  "problem": "x^3 = 2 의 해 (세제곱근)",
-  "domain": {"lo": 0.0, "hi": 2.0, "type": "real"},
-  "interval": "closed",
-  "loop": "고정 반복 / 폭 조건 전환",
-  "mid": "lo + (hi - lo) / 2",
-  "predicate": "mid * mid * mid >= 2",
-  "update": {"true": "hi = mid", "false": "lo = mid"},
-  "returns": "lo",
-  "columns": ["step", "lo", "hi", "width", "mid", "mid^3", "p(mid)", "update"],
-  "format": {"value": "%.12f", "width": "%.3e"},
+  "array": [10, 20, 20, 30, 40, 50, 60],
+  "target": 35,
+  "predicate": "a[mid] >= target",
+  "interval": "half-open",
+  "columns": ["step", "lo", "hi", "width", "mid", "a[mid]", "p(mid)", "update"],
   "show": {
-    "invariant": "답은 항상 [lo, hi] 안에 있다",
-    "measure": "width = hi - lo",
-    "widthPlot": "log",
-    "ulpLine": true,
-    "stallBadge": true,
-    "digitsGained": true
+    "invariant": "답은 항상 [lo, hi) 안에 있다 — 깨지는 것은 불변식이 아니라 측도다",
+    "measure": true,
+    "window": true,
+    "discarded": true
   },
-  "controls": {"step": true, "rewind": true, "editTarget": true,
-               "epsSlider": [1e-15, 1e-3], "iterSlider": [1, 200],
-               "scaleSelect": [2.0, 1e6, 1e18, 1e54]},
+  "controls": {"step": true, "rewind": true},
   "variants": [
-    {"id": "fixed", "label": "고정 100회", "stop": {"kind": "iterations", "n": 100}},
-    {"id": "absolute", "label": "while hi-lo > eps", "stop": {"kind": "absolute", "eps": 1e-9},
-     "expect": "stall-at-large-scale"},
-    {"id": "relative", "label": "while hi-lo > eps*|lo|",
-     "stop": {"kind": "relative", "eps": 1e-12}}
+    {"id": "half-open", "label": "정상 (lo = mid + 1)"},
+    {"id": "stall", "label": "정지 (lo = mid)"}
   ],
   "stallDetect": true
 }
 :::
 
-위젯의 중심은 배열도 구간도 아니라 **로그 축에 그려지는 폭 곡선**이다. 스텝을 누를 때마다 폭이 정확히 절반으로 떨어지므로 로그 축에서는 직선으로 내려간다. 그 직선이 어느 높이에서 수평으로 꺾이는데, 그 높이에 ULP 선이 점선으로 그어져 있다. 위쪽 슬라이더로 탐색 구간의 크기를 $2$에서 $10^{54}$까지 바꾸면 ULP 선이 통째로 위아래로 움직이고, `EPS` 슬라이더로 그은 선이 ULP 선보다 아래로 내려가는 순간 정지 배지가 붉게 켜진다 — 그 조합이 곧 무한 루프다. 옆에는 "이번 스텝에서 확정된 유효숫자 자릿수"가 함께 찍혀서, 한 번 반복이 십진 약 0.3자리를 벌어 준다는 것이 숫자로 보인다.
+두 번째 탭을 고르면 폭 열이 `1`에서 멈추고 같은 줄이 계속 쌓이며 그 칸이 빨갛게 굳는다. **불변식은 멀쩡하다.** 답은 여전히 `[lo, hi)` 안에 있고, 깨진 것은 "폭이 매 반복 줄어든다"는 측도뿐이다. 실수판의 무한 루프도 같은 진단을 받는다 — `lo`와 `hi`가 이웃한 두 `double`이 되면 `mid`가 둘 중 하나와 같아져 갱신이 아무것도 바꾸지 못한다. 정수판에서 그 최소 간격이 1로 고정인 반면, 실수판에서는 그것이 **값의 크기에 따라 움직인다.** 그래서 정수판의 정지는 코드를 보면 알 수 있고, 실수판의 정지는 **입력을 봐야 안다.**
 
 ### 2.3 그래서 반복 횟수를 고정한다
 

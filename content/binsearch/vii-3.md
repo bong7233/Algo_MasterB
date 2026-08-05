@@ -41,42 +41,25 @@
 랜선 길이 $x$를 키우면 나오는 개수는 절대 늘지 않는다. 그래서 "가능"은 앞에서 참, 뒤에서 거짓이고 **한 번만** 뒤집힌다. 이 줄은 [VII-1](#/vii-1) §2.1의 술어 줄과 정확히 같은 모양이다. 다른 것은 줄을 만든 재료뿐이다 — 저기서는 배열 원소를 비교했고, 여기서는 판정 함수를 호출한다.
 
 ::: widget binary-search-bounds {
-  "mode": "answer-space",
-  "problem": "랜선 K개를 잘라 같은 길이 N개 만들기",
-  "input": {"a": [802, 743, 457, 539], "n": 11},
-  "domain": {"lo": 1, "hi": "max(a) + 1", "type": "int"},
+  "array": [0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+  "target": 1,
+  "predicate": "a[mid] >= target",
   "interval": "half-open",
-  "loop": "lo < hi",
-  "mid": "lo + (hi - lo) // 2",
-  "judge": {"label": "sum(v // x) >= n", "cost": "O(K)",
-            "detail": ["802 // x", "743 // x", "457 // x", "539 // x"]},
-  "predicate": "not judge(mid)",
-  "predicateLabel": "x 로는 모자란다",
-  "update": {"true": "hi = mid", "false": "lo = mid + 1"},
-  "returns": "lo - 1",
-  "columns": ["step", "lo", "hi", "width", "mid", "judge(mid)", "p(mid)", "update"],
+  "columns": ["step", "lo", "hi", "width", "mid", "a[mid]", "p(mid)", "update"],
   "show": {
-    "invariant": "경계는 항상 [lo, hi) 안에 있다",
-    "measure": "width = hi - lo",
-    "truthRow": true,
-    "judgePanel": true,
-    "callCounter": true,
+    "invariant": "경계는 항상 [lo, hi) 안에 있다 (칸 i = 후보 x = i + 1)",
+    "measure": true,
     "window": true,
     "discarded": true
   },
-  "controls": {"step": true, "rewind": true, "editInput": true, "editN": true},
-  "variants": [
-    {"id": "maximize", "label": "최대화 (마지막 참)", "predicate": "not judge(mid)",
-     "returns": "lo - 1"},
-    {"id": "minimize", "label": "최소화 (첫 참)", "predicate": "judge(mid)",
-     "returns": "lo"},
-    {"id": "nonmonotone", "label": "단조가 아닌 판정", "input": {"a": [2, 3], "n": 0},
-     "judge": {"label": "부분집합 합이 정확히 x"}, "expect": "wrong-answer"}
-  ]
+  "controls": {"step": true, "rewind": true},
+  "stallDetect": false
 }
 :::
 
-위젯의 화면은 두 층이다. 위층은 답 후보 구간 `[lo, hi)`이고, 아래층은 그 `mid` 하나를 판정하는 과정이다 — 네 개의 나눗셈이 하나씩 계산되고 합계가 `n`과 비교된다. **판정 호출 카운터**가 오른쪽 위에 붙어 있어서 스텝을 아무리 눌러도 그 숫자가 10 언저리에서 멈추는 것이 보인다. 후보 구간 아래에는 참·거짓 줄이 깔려 있고, 회색으로 지워지는 절반이 실제로는 판정을 **한 번도 하지 않고** 버려지는 후보들이라는 것을 보여 준다. 탭으로 최대화판·최소화판·단조가 깨진 판을 갈아 끼울 수 있고, 세 번째를 고르면 참·거짓 줄이 얼룩덜룩해지면서 이분 탐색이 엉뚱한 자리를 답이라고 내놓는다.
+**이 위젯의 배열 한 칸은 배열 원소가 아니라 후보 하나의 판정 결과다.** 축소한 예제 `a = [20, 15, 9]`, `n = 6`에 대해 후보 $x = 1$부터 20까지를 늘어놓고, 각 칸에 `p(x)`를 적었다 — 0이면 "충분하다", 1이면 "모자란다"다. 칸 `i`가 후보 `x = i + 1`이다. 앞의 여섯 칸이 0, 나머지가 1인 이 줄이 §2.1의 그림 그 자체이고, ==정렬된 배열이 없는데도 이분 탐색이 도는 이유가 이 줄 하나에 있다.==
+
+스텝을 누르면 살아 있는 구간 `[lo, hi)`가 색으로 남고 버려진 절반이 회색으로 지워진다. **회색 칸은 판정을 한 번도 하지 않고 버린 후보다** — 실제 코드에서는 그 칸의 값을 계산조차 하지 않는다. 표에는 `lo`·`hi`·폭·`mid`·`a[mid]`·`p(mid)`가 한 줄씩 쌓이고, 위젯의 중심은 여전히 **폭 열**이다. 다섯 스텝이면 후보 20개가 한 칸으로 줄고, 처음 1이 나오는 칸은 인덱스 6, 곧 후보 $x = 7$이다. 답은 그 한 칸 왼쪽인 6이다.
 
 ### 2.2 성립 조건은 단조성 하나뿐이다
 
