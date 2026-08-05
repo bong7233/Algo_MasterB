@@ -77,25 +77,31 @@ CAP = 3_000_000
 
 
 def subset_top_down(ws: list[int], cap: int) -> tuple[int, int]:
-    """(최대 합, 실제로 계산한 상태 수). 상태는 (인덱스, 남은 용량)."""
+    """(최대 합, 실제로 계산한 상태 수). 상태는 (앞 i개까지, 남은 용량).
+
+    본문 VIII-2 §4.2 의 ::: dual 과 **같은 방향**이다 — 앞에서부터 i개를 세는
+    접두 방향이고 i == 0 이 기저다. 방향을 뒤집으면 닿는 상태 수가 달라지므로
+    본문의 수치와 이 스크립트의 수치가 어긋난다. 일부러 맞춰 둔다.
+    """
     memo: dict[tuple[int, int], int] = {}
 
     def go(i: int, left: int) -> int:
-        if i == len(ws):
+        if i == 0:
             return 0
         key = (i, left)
         hit = memo.get(key)
         if hit is not None:
             return hit
-        best = go(i + 1, left)
-        if ws[i] <= left:
-            cand = ws[i] + go(i + 1, left - ws[i])
+        best = go(i - 1, left)
+        w = ws[i - 1]
+        if w <= left:
+            cand = w + go(i - 1, left - w)
             if cand > best:
                 best = cand
         memo[key] = best
         return best
 
-    ans = go(0, cap)
+    ans = go(len(ws), cap)
     return ans, len(memo)
 
 

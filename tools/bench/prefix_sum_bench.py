@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """VI-4 본문 수치 — 구간 합 질의를 매번 더할 때와 누적 합을 쓸 때.
 
-측정 환경은 CLAUDE.md §1-3 고정. 3회 실행의 중앙값을 본문에 적는다.
+측정 환경은 CLAUDE.md §1-3 고정. 스크립트 안에서 3회 재어 중앙값을 내고,
+본문 수치는 이 스크립트를 5회 실행한 중앙값이다.
 
 사용법
     python3.13 tools/bench/prefix_sum_bench.py

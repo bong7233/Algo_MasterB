@@ -1,6 +1,7 @@
 // VI-4 본문 수치 (C++ 쪽) — 구간 합 질의: 매번 더하기 vs 누적 합.
 // 빌드: g++ -std=c++17 -O2 tools/bench/prefix_sum_bench.cpp -o /tmp/psb && /tmp/psb
-// 측정 환경은 CLAUDE.md §1-3 고정. 3회 실행의 중앙값을 본문에 적는다.
+// 측정 환경은 CLAUDE.md §1-3 고정. 프로그램 안에서 3회 재어 중앙값을 내고,
+// 본문 수치는 이 프로그램을 5회 실행한 중앙값이다.
 #include <algorithm>
 #include <chrono>
 #include <cstdio>

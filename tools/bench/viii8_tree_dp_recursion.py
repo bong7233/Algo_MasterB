@@ -102,6 +102,26 @@ def brute(adj, w, n):
     return best
 
 
+def greedy_heavy(adj, w, n):
+    """무거운 정점부터 고른다 — 트리 DP 자리에서 가장 먼저 떠오르는 그리디."""
+    blocked = [False] * (n + 1)
+    tot = 0
+    for v in sorted(range(1, n + 1), key=lambda x: -w[x]):
+        if blocked[v]:
+            continue
+        tot += w[v]
+        for nx in adj[v]:
+            blocked[nx] = True
+    return tot
+
+
+def greedy_leaves(adj, w, n):
+    """잎만 전부 고른다 — 잎끼리는 인접하지 않으므로 언제나 유효한 답이다."""
+    if n == 1:
+        return w[1]
+    return sum(w[v] for v in range(1, n + 1) if len(adj[v]) == 1)
+
+
 CHILD = r"""
 import sys, random
 sys.setrecursionlimit(%d)
@@ -179,6 +199,25 @@ def main() -> None:
             bad += 1
             print("    불일치! n=%d dp=%d brute=%d" % (n, x, y))
     print("    불일치 %d건 / 300건" % bad)
+
+    print("[5] 그리디 두 가지가 최적을 놓치는 비율 (무작위 트리 1,000개)")
+    r3 = random.Random(20250805)
+    lost_heavy = lost_leaf = 0
+    for _ in range(1000):
+        n = r3.randint(3, 12)
+        a3: list[list[int]] = [[] for _ in range(n + 1)]
+        for v in range(2, n + 1):
+            p = r3.randint(1, v - 1)
+            a3[v].append(p)
+            a3[p].append(v)
+        w3 = [0] + [r3.randint(1, 20) for _ in range(n)]
+        opt = dp_iterative(a3, w3, 1)
+        if greedy_heavy(a3, w3, n) < opt:
+            lost_heavy += 1
+        if greedy_leaves(a3, w3, n) < opt:
+            lost_leaf += 1
+    print("    무거운 것부터: %d회(%.1f%%) / 잎만 고르기: %d회(%.1f%%)"
+          % (lost_heavy, lost_heavy / 10, lost_leaf, lost_leaf / 10))
 
 
 if __name__ == "__main__":
