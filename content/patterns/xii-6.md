@@ -44,7 +44,7 @@
 변하지 않는 것은 이것 하나다.
 
 ```text nolines
-  samples  ──▶  [ 줄이는 무언가 ]  ──▶  samples
+  samples  ──▶  [ reduce ]  ──▶  samples        <- 줄이는 무언가
 ```
 
 들어가는 것도 샘플 목록이고 나오는 것도 샘플 목록이다. 어떤 방법을 쓰든 이 계약은 같다.
