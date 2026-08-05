@@ -499,7 +499,7 @@ def dedicated(src):
 
 
 # 나쁜 판 2 — 한 루프가 모든 핸들을 돌지만, 느린 일을 루프 안에서 직접 한다
-def reactor_inline(src):
+def loop_inline(src):
     spent, urgent_at = 0, -1
     idx = {h: 0 for h in ORDER}
     while any(idx[h] < len(src[h]) for h in ORDER):
@@ -516,7 +516,7 @@ def reactor_inline(src):
 
 
 # 좋은 판 — 루프는 다중화만 하고, 느린 일은 큐 너머 워커 스레드가 한다
-def reactor_worker(src, q):
+def loop_worker(src, q):
     spent, urgent_at = 0, -1
     idx = {h: 0 for h in ORDER}
     while any(idx[h] < len(src[h]) for h in ORDER):
@@ -545,12 +545,12 @@ def worker_loop(q, done):
 
 
 print("전담 방식      : 긴급 이벤트를 비용", dedicated(make_sources()), "에서 집는다")
-print("리액터(인라인) : 긴급 이벤트를 비용", reactor_inline(make_sources()), "에서 집는다")
+print("한 루프(인라인) : 긴급 이벤트를 비용", loop_inline(make_sources()), "에서 집는다")
 
 q, done = queue.Queue(), []
 th = threading.Thread(target=worker_loop, args=(q, done))
 th.start()
-print("리액터+워커 큐 : 긴급 이벤트를 비용", reactor_worker(make_sources(), q), "에서 집는다")
+print("한 루프+워커 큐 : 긴급 이벤트를 비용", loop_worker(make_sources(), q), "에서 집는다")
 q.put(None)
 th.join()
 print("워커가 끝낸 느린 작업:", " ".join(done))
@@ -594,7 +594,7 @@ int dedicated(Sources src) {
 }
 
 // 나쁜 판 2 — 한 루프가 모든 핸들을 돌지만, 느린 일을 루프 안에서 직접 한다
-int reactor_inline(Sources src) {
+int loop_inline(Sources src) {
     int spent = 0, urgent_at = -1;
     map<string, int> idx;
     auto pending = [&] {
@@ -623,7 +623,7 @@ struct Chan {
     bool closed = false;
 };
 
-int reactor_worker(Sources src, Chan& ch) {
+int loop_worker(Sources src, Chan& ch) {
     int spent = 0, urgent_at = -1;
     map<string, int> idx;
     auto pending = [&] {
@@ -668,12 +668,12 @@ void worker_loop(Chan& ch, vector<string>& done) {
 
 int main() {
     cout << "전담 방식      : 긴급 이벤트를 비용 " << dedicated(make_sources()) << " 에서 집는다\n";
-    cout << "리액터(인라인) : 긴급 이벤트를 비용 " << reactor_inline(make_sources()) << " 에서 집는다\n";
+    cout << "한 루프(인라인) : 긴급 이벤트를 비용 " << loop_inline(make_sources()) << " 에서 집는다\n";
 
     Chan ch;
     vector<string> done;
     thread th(worker_loop, ref(ch), ref(done));
-    cout << "리액터+워커 큐 : 긴급 이벤트를 비용 " << reactor_worker(make_sources(), ch) << " 에서 집는다\n";
+    cout << "한 루프+워커 큐 : 긴급 이벤트를 비용 " << loop_worker(make_sources(), ch) << " 에서 집는다\n";
     {
         lock_guard<mutex> g(ch.mtx);
         ch.closed = true;
@@ -690,13 +690,13 @@ int main() {
 
 ```console
 전담 방식      : 긴급 이벤트를 비용 18 에서 집는다
-리액터(인라인) : 긴급 이벤트를 비용 10 에서 집는다
-리액터+워커 큐 : 긴급 이벤트를 비용 2 에서 집는다
+한 루프(인라인) : 긴급 이벤트를 비용 10 에서 집는다
+한 루프+워커 큐 : 긴급 이벤트를 비용 2 에서 집는다
 워커가 끝낸 느린 작업: netA#0 netB#0 netA#1
 ```
 
 ::: hist
-다중화기가 $O(H)$에서 $O(k)$로 간 것이 2000년대 초 서버 성능 논쟁의 실체다. 옛 `select` 는 감시할 핸들 전체를 매 호출마다 커널에 넘기고 커널이 전부를 훑었다. 핸들이 1만 개면 준비된 것이 하나뿐이어도 1만 개를 본다. `epoll` 은 감시 목록을 커널에 한 번 등록해 두고 **준비된 것만** 돌려준다. 등록 비용을 한 번 치르고 반복 비용을 없앤 것이고, 자료구조 관점에서는 매번 선형 탐색하던 것을 상주 인덱스로 바꾼 것이다. 패턴의 모양은 그대로이고 다중화기 하나만 바뀌었다는 점이 중요하다 — **Reactor 는 다중화기를 갈아 끼울 수 있게 이름 붙인 자리다.**
+다중화기가 $O(H)$에서 $O(k)$로 간 것이 2000년대 초 서버 성능 논쟁의 실체다. 옛 `select` 는 감시할 핸들 전체를 매 호출마다 커널에 넘기고 커널이 전부를 훑었다. 핸들이 1만 개면 준비된 것이 하나뿐이어도 1만 개를 본다. `epoll` 은 감시 목록을 커널에 한 번 등록해 두고 **준비된 것만** 돌려준다. 등록 비용을 한 번 치르고 반복 비용을 없앤 것이고, 자료구조 관점에서는 매번 선형 탐색하던 것을 상주 인덱스로 바꾼 것이다. 구조는 그대로이고 다중화기 하나만 바뀌었다는 점이 중요하다 — **이 배치는 다중화기를 갈아 끼울 수 있게 만들어 둔 자리다.**
 :::
 
 **복잡도:** 다중화 자체는 준비된 핸들 하나당 $O(1)$ 디스패치다. 위 코드는 매 바퀴 모든 핸들을 훑으므로 $O(H)$이고, 실제 시스템의 `epoll` / `kqueue` 는 **준비된 것만** 돌려주어 $O(k)$가 된다($k$ = 준비된 핸들 수). 이 차이가 옛 `select` 와 `epoll` 을 가른 지점이다. 긴급 이벤트의 대기 시간은 **앞에서 인라인으로 처리한 일의 총 비용**이므로, 느린 일을 큐로 밀어내면 18에서 2로 줄어든다. 공간은 핸들 표 $O(H)$ + 큐 $O(n)$.
@@ -722,7 +722,7 @@ int main() {
 
 **Active Object.** 메서드 호출을 요청 객체로 바꿔 큐에 싣고, 그 객체의 전용 스레드가 큐에서 하나씩 꺼내 실행한다. 참여자는 프록시(호출자가 보는 얼굴), 요청 큐, 스케줄러(꺼내는 규칙), 서번트(실제 일을 하는 객체), 그리고 결과를 나중에 받을 퓨처다. 의도는 **호출자의 실행 흐름과 객체의 실행 흐름을 끊는 것**이고, 부수 효과로 서번트 안에는 동시성이 사라진다. Actor 모델과 뿌리가 같다.
 
-**Reactor.** 여러 핸들을 한 곳에서 기다렸다가, 준비된 것만 골라 미리 등록된 핸들러에게 넘긴다. 참여자는 핸들, 동기적 이벤트 다중화기, 디스패처, 그리고 구체 핸들러다. 의도는 **기다림을 한곳에 모아 스레드 수를 입력원 수에서 떼어 내는 것**이다. `epoll` 을 쓰는 모든 서버가 이 모양이다.
+**Reactor.** 여러 핸들을 한 곳에서 기다렸다가, 준비된 것만 골라 미리 등록된 핸들러에게 넘긴다. 참여자는 핸들, 동기적 이벤트 다중화기, 디스패처, 그리고 구체 핸들러다. 의도는 **기다림을 한곳에 모아 스레드 수를 입력원 수에서 떼어 내는 것**이다. `epoll` 을 쓰는 모든 서버가 이 모양이고, 3.3의 `hist` 상자에서 다중화기가 `select` 에서 `epoll` 로 바뀌어도 구조가 그대로였던 이유가 이것이다 — 이 패턴은 다중화기를 갈아 끼울 수 있게 이름 붙인 자리다.
 
 **Half-Sync/Half-Async.** 시스템을 두 계층으로 가르고 사이에 큐를 둔다. 비동기 계층은 절대 막히지 않고 받아서 큐에 넣는 일만 한다. 동기 계층은 큐에서 꺼내 마음껏 막힌다. 참여자는 두 계층과 그 사이의 큐 하나다. 의도는 **"막히면 안 되는 코드"와 "짜기 쉬운 코드"를 둘 다 갖는 것**이다. 비동기 코드는 성능이 좋고 짜기 어렵다. 동기 코드는 반대다. 이 패턴은 둘 중 하나를 고르지 않고 경계를 긋는다.
 

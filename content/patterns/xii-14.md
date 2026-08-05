@@ -41,9 +41,9 @@
 ```text nolines
   dependency arrows                       stages
       outside                             in ──▶ [f1] ──▶ [f2] ──▶ [f3] ──▶ out
-        │  adapters                             └── each sees only the previous output
+        │  outer impls                          └── each sees only the previous output
         ▼
-     ┌──────┐  ports are declared here
+     ┌──────┐  the shapes it needs live here
      │domain│  <- nothing inside points outward
      └──────┘
                                           blackboard
@@ -249,7 +249,7 @@ int main() {
 배터리 잔여 시간을 계산하는 업무 규칙이 있다. 나쁜 판에서는 그 함수가 시리얼 드라이버를 직접 연다. 좋은 판에서는 규칙이 필요한 모양만 선언하고 바깥이 그 모양에 맞춘다.
 
 ::: dual
-```python title="포트를 안쪽에 두기 — 직접 의존과 포트/어댑터"
+```python title="경계를 안쪽에 두기 — 직접 의존과 경계 인터페이스"
 from typing import Protocol
 
 
@@ -267,21 +267,21 @@ def hours_left_direct(load_w):
     return (v * 50.0) / load_w
 
 
-# 좋은 판 — 도메인이 포트를 정의하고, 바깥이 그 모양에 맞춘다
-class BatteryPort(Protocol):                      # 이 선언은 도메인 쪽에 있다
+# 좋은 판 — 도메인이 필요한 모양을 정의하고, 바깥이 그 모양에 맞춘다
+class BatterySource(Protocol):                      # 이 선언은 도메인 쪽에 있다
     def voltage(self) -> float: ...
 
 
-def hours_left(battery: BatteryPort, load_w):     # 도메인 규칙. 드라이버를 모른다
+def hours_left(battery: BatterySource, load_w):     # 도메인 규칙. 드라이버를 모른다
     return (battery.voltage() * 50.0) / load_w
 
 
-class SerialBmsAdapter:                           # 바깥 어댑터
+class SerialBms:                           # 바깥 구현
     def voltage(self):
         return open_serial("/dev/ttyUSB0")
 
 
-class FakeBattery:                                # 시험용 어댑터
+class FakeBattery:                                # 시험용 구현
     def __init__(self, v):
         self._v = v
 
@@ -297,15 +297,15 @@ except DriverError as e:
 
 cases = [(FakeBattery(48.0), 100.0, 24.0), (FakeBattery(24.0), 200.0, 6.0)]
 ok = sum(1 for b, load, want in cases if abs(hours_left(b, load) - want) < 1e-9)
-print(f"포트/어댑터: 가짜 어댑터로 도메인 검증 {ok}/{len(cases)} 통과")
+print(f"경계 있음  : 가짜 구현으로 도메인 검증 {ok}/{len(cases)} 통과")
 
 try:
-    hours_left(SerialBmsAdapter(), 100.0)
-    print("포트/어댑터: 실장비 어댑터 통과")
+    hours_left(SerialBms(), 100.0)
+    print("경계 있음  : 실장비 구현 통과")
 except DriverError as e:
-    print("포트/어댑터: 실장비 어댑터는 여전히", e, "— 도메인 코드는 한 줄도 안 바뀌었다")
+    print("경계 있음  : 실장비 구현은 여전히", e, "— 도메인 코드는 한 줄도 안 바뀌었다")
 ```
-```cpp title="포트를 안쪽에 두기 — 직접 의존과 포트/어댑터"
+```cpp title="경계를 안쪽에 두기 — 직접 의존과 경계 인터페이스"
 #include <cmath>
 #include <iostream>
 #include <memory>
@@ -329,21 +329,21 @@ double hours_left_direct(double load_w) {
     return (v * 50.0) / load_w;
 }
 
-// 좋은 판 — 도메인이 포트를 정의하고, 바깥이 그 모양에 맞춘다
-struct BatteryPort {                               // 이 선언은 도메인 쪽에 있다
+// 좋은 판 — 도메인이 필요한 모양을 정의하고, 바깥이 그 모양에 맞춘다
+struct BatterySource {                               // 이 선언은 도메인 쪽에 있다
     virtual double voltage() const = 0;
-    virtual ~BatteryPort() = default;
+    virtual ~BatterySource() = default;
 };
 
-double hours_left(const BatteryPort& battery, double load_w) {  // 도메인 규칙. 드라이버를 모른다
+double hours_left(const BatterySource& battery, double load_w) {  // 도메인 규칙. 드라이버를 모른다
     return (battery.voltage() * 50.0) / load_w;
 }
 
-struct SerialBmsAdapter : BatteryPort {            // 바깥 어댑터
+struct SerialBms : BatterySource {            // 바깥 구현
     double voltage() const override { return open_serial("/dev/ttyUSB0"); }
 };
 
-struct FakeBattery : BatteryPort {                 // 시험용 어댑터
+struct FakeBattery : BatterySource {                 // 시험용 구현
     explicit FakeBattery(double v) : _v(v) {}
     double voltage() const override { return _v; }
     double _v;
@@ -357,21 +357,21 @@ int main() {
         cout << "직접 의존  : 도메인을 검증할 수 없다 — " << e.what() << "\n";
     }
 
-    vector<unique_ptr<BatteryPort>> fakes;
+    vector<unique_ptr<BatterySource>> fakes;
     fakes.push_back(make_unique<FakeBattery>(48.0));
     fakes.push_back(make_unique<FakeBattery>(24.0));
     vector<pair<double, double>> cases = {{100.0, 24.0}, {200.0, 6.0}};
     int ok = 0;
     for (size_t i = 0; i < cases.size(); i++)
         if (fabs(hours_left(*fakes[i], cases[i].first) - cases[i].second) < 1e-9) ok++;
-    cout << "포트/어댑터: 가짜 어댑터로 도메인 검증 " << ok << "/" << cases.size() << " 통과\n";
+    cout << "경계 있음  : 가짜 구현으로 도메인 검증 " << ok << "/" << cases.size() << " 통과\n";
 
     try {
-        SerialBmsAdapter real;
+        SerialBms real;
         hours_left(real, 100.0);
-        cout << "포트/어댑터: 실장비 어댑터 통과\n";
+        cout << "경계 있음  : 실장비 구현 통과\n";
     } catch (const DriverError& e) {
-        cout << "포트/어댑터: 실장비 어댑터는 여전히 " << e.what()
+        cout << "경계 있음  : 실장비 구현은 여전히 " << e.what()
              << " — 도메인 코드는 한 줄도 안 바뀌었다\n";
     }
     return 0;
@@ -381,21 +381,21 @@ int main() {
 
 ```console
 직접 의존  : 도메인을 검증할 수 없다 — /dev/ttyUSB0 를 열 수 없음
-포트/어댑터: 가짜 어댑터로 도메인 검증 2/2 통과
-포트/어댑터: 실장비 어댑터는 여전히 /dev/ttyUSB0 를 열 수 없음 — 도메인 코드는 한 줄도 안 바뀌었다
+경계 있음  : 가짜 구현으로 도메인 검증 2/2 통과
+경계 있음  : 실장비 구현은 여전히 /dev/ttyUSB0 를 열 수 없음 — 도메인 코드는 한 줄도 안 바뀌었다
 ```
 
-**복잡도:** 포트를 하나 거치는 실행 비용은 시간 $O(1)$ — 가상 함수 호출 한 번, 곧 간접 분기 하나다. 상수는 대개 무시할 만하지만 **인라인 확장이 막힌다는 점**이 뜨거운 루프에서 문제가 된다. 한 픽셀마다 포트를 부르면 함수 호출 오버헤드가 계산 자체를 넘어선다. 그런 자리에서는 포트를 **한 픽셀이 아니라 한 프레임 단위로** 잡는다. 공간은 어댑터 객체 하나당 $O(1)$이고, 가상 함수 테이블 포인터가 객체마다 8바이트씩 붙는다.
+**복잡도:** 경계를 하나 거치는 실행 비용은 시간 $O(1)$ — 가상 함수 호출 한 번, 곧 간접 분기 하나다. 상수는 대개 무시할 만하지만 **인라인 확장이 막힌다는 점**이 뜨거운 루프에서 문제가 된다. 한 픽셀마다 경계를 넘으면 함수 호출 오버헤드가 계산 자체를 넘어선다. 그런 자리에서는 경계를 **한 픽셀이 아니라 한 프레임 단위로** 잡는다. 공간은 바깥 구현 객체 하나당 $O(1)$이고, 가상 함수 테이블 포인터가 객체마다 8바이트씩 붙는다.
 
 | 언어 차이 | Python | C++ |
 |---|---|---|
-| 포트 선언 | `Protocol` — 구조가 맞으면 상속 없이 꽂힌다. **서드파티 클래스를 그대로 어댑터로 쓸 수 있다** | 순수 가상 클래스를 상속해야 한다. 서드파티를 감쌀 얇은 클래스가 하나 더 필요하다 |
+| 경계 선언 | `Protocol` — 구조가 맞으면 상속 없이 꽂힌다. **서드파티 클래스를 그대로 끼울 수 있다** | 순수 가상 클래스를 상속해야 한다. 서드파티를 감쌀 얇은 클래스가 하나 더 필요하다 |
 | 검사 시점 | 실행 시점. `Protocol` 은 타입 검사기에게만 말한다 | 컴파일 시점. 메서드 하나만 빠져도 안 된다 |
-| 소유권 | 참조 계수 | `unique_ptr` 로 명시한다. 포트는 참조로 받고 소유는 조립하는 쪽이 한다 |
-| 대안 | 함수 하나면 되는 포트는 그냥 함수를 넘긴다 | `std::function` 으로 같은 일을 하되 호출 비용이 조금 더 든다 |
+| 소유권 | 참조 계수 | `unique_ptr` 로 명시한다. 경계는 참조로 받고 소유는 조립하는 쪽이 한다 |
+| 대안 | 함수 하나면 되는 경계는 그냥 함수를 넘긴다 | `std::function` 으로 같은 일을 하되 호출 비용이 조금 더 든다 |
 
 ::: tip
-포트가 메서드 하나뿐이라면 Python 에서는 클래스를 만들 이유가 없다. `hours_left(read_voltage, load_w)` 로 함수를 그냥 넘겨라. **클래스가 필요해지는 경계는 셋이다** — 포트에 메서드가 둘 이상 생길 때, 어댑터가 상태(연결·재시도 카운터)를 들 때, 여러 구현을 이름으로 등록·발견해야 할 때. 그 전까지 인터페이스 선언은 비용만 있고 이득이 없다. [XII-15 안티패턴](#/xii-15)의 마지막 항목이 정확히 이 이야기다.
+경계 인터페이스에 메서드가 하나뿐이라면 Python 에서는 클래스를 만들 이유가 없다. `hours_left(read_voltage, load_w)` 로 함수를 그냥 넘겨라. **클래스가 필요해지는 조건은 셋이다** — 메서드가 둘 이상 생길 때, 바깥 구현이 상태(연결·재시도 카운터)를 들 때, 여러 구현을 이름으로 등록·발견해야 할 때. 그 전까지 인터페이스 선언은 비용만 있고 이득이 없다. [XII-15 안티패턴](#/xii-15)의 마지막 항목이 정확히 이 이야기다.
 :::
 
 ### 3.3 단계를 표에 등록하고 문자열로 조립한다
@@ -602,7 +602,7 @@ int main() {
 
 **계층형 아키텍처 / Sense-Plan-Act.** 시스템을 감지·계획·구동 세 층으로 쌓고 데이터가 한 방향으로 흐르게 한다. 1980년대 로보틱스의 표준 구조였고, 지금도 데이터가 위에서 아래로만 흐르는 모든 계층형 설계가 같은 모양이다. 대가는 3.1에서 잰 그대로다 — **계층 수만큼의 지연.** 이 한계 때문에 Brooks 가 1986년에 subsumption architecture 를 내놓았고, 감지에서 구동으로 바로 가는 낮은 층이 필요할 때 위층을 억누른다는 발상이 거기서 나왔다. 오늘날의 실용적 답은 둘 중 하나를 고르는 것이 아니라 **계획 경로 옆에 반사 경로를 두는 것**이다. 긴급 정지는 계획을 통과하지 않는다.
 
-**포트&어댑터 / 헥사고날.** 도메인이 필요한 것의 인터페이스(포트)를 **자기 안에** 선언하고, 바깥의 어댑터가 그 포트를 구현한다. 의존의 화살표는 언제나 안쪽을 향한다. [XII-2 Adapter](#/xii-2)가 클래스 하나를 다른 인터페이스에 맞추는 것이라면, 이것은 **시스템 전체를 그 원리로 세운 것**이다. 참여자는 도메인, 포트, 주도하는 어댑터(화면·API), 주도되는 어댑터(DB·장비)다. 얻는 것은 3.2의 출력 그대로 — 도메인이 바깥 없이 검증된다.
+**포트&어댑터 / 헥사고날.** 3.2에서 "경계 인터페이스"라고 부른 것의 이름이 **포트**이고, 그것을 구현하는 "바깥 구현"이 **어댑터**다. 도메인이 필요한 것의 인터페이스를 **자기 안에** 선언하고, 바깥의 어댑터가 그 포트를 구현한다. 의존의 화살표는 언제나 안쪽을 향한다. [XII-2 Adapter](#/xii-2)가 클래스 하나를 다른 인터페이스에 맞추는 것이라면, 이것은 **시스템 전체를 그 원리로 세운 것**이다. 참여자는 도메인, 포트, 주도하는 어댑터(화면·API), 주도되는 어댑터(DB·장비)다. 얻는 것은 3.2의 출력 그대로 — 도메인이 바깥 없이 검증된다.
 
 **플러그인 아키텍처.** 안정된 인터페이스 하나, 이름과 구현을 잇는 레지스트리, 그리고 등록을 일으키는 발견 절차(모듈 스캔·설정 파일·동적 로딩). [XII-5 Factory Method / Abstract Factory / Builder](#/xii-5)의 팩토리를 시스템 크기로 올린 것이고, 다른 점은 **구현이 코어와 함께 빌드되지 않아도 된다**는 것이다. 코어는 자기가 모르는 구현을 실행 중에 얻는다.
 
