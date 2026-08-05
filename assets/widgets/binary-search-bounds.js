@@ -32,7 +32,7 @@
 
   var MAX_N = 24;        // 이보다 많으면 400px 폭에서 칸 글자가 뭉갠다
   var MAX_STEPS = 400;   // 계약 §7
-  var STALL_ROWS = 4;    // 정체를 보여 주기에 네 줄이면 충분하다. 그 뒤는 같은 줄의 반복일 뿐이다
+  var STALL_ROWS = 3;    // 얼어붙은 줄을 몇 개나 쌓아 보일 것인가. 셋이면 "안 줄어든다"가 전달된다
 
   var FONT = '-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif';
   var MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace';
@@ -168,6 +168,7 @@
     var states = [];
     var rows = [];
     var stalled = false;
+    var frozenRows = 0;
     var guard = 0;
 
     // 스텝 0 — 아직 mid 를 고르지 않은 초기 구간
@@ -194,7 +195,7 @@
       }
 
       var frozen = (lo === pLo && hi === pHi);
-      if (frozen) stalled = true;
+      if (frozen) { stalled = true; frozenRows += 1; }
 
       rows.push({
         step: rows.length + 1,
@@ -213,9 +214,9 @@
 
       guard += 1;
 
-      // 정체는 네 줄이면 충분히 보인다. 그 뒤는 같은 줄의 무한 반복이라
-      // 스텝만 늘고 배우는 것이 없다.
-      if (stalled && rows.length >= STALL_ROWS) break;
+      // 얼어붙은 줄을 몇 개 쌓아 "폭이 줄지 않는다"를 눈으로 확인시킨 뒤 끊는다.
+      // 진짜 무한 루프를 끝까지 돌릴 수는 없으므로, 반복이 보일 만큼만 남긴다.
+      if (frozenRows >= STALL_ROWS) break;
     }
 
     var ret = closed ? ans : lo;
@@ -635,7 +636,8 @@
         ctx.font = '600 11px ' + FONT;
         ctx.fillStyle = T.fgDim;
         ctx.textAlign = 'left';
-        ctx.fillText(goals[gi].label + ' 의 표  ·  술어 ' + goals[gi].pred.src, x0, y + 7);
+        ctx.fillText(goals[gi].label + '  ·  while (' + r.variant.loop + ')  ·  mid = lo + (hi - lo) // 2  ·  술어 ' +
+          goals[gi].pred.src, x0, y + 7);
         y += 18;
       }
 
