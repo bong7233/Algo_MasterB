@@ -341,7 +341,7 @@ class RealDevice:
         return "real"
 
 
-class SimFactory:                     # 시계를 자기가 들고, 장비에게도 그 시계를 준다
+class SimSetup:                     # 시계를 자기가 들고, 장비에게도 그 시계를 준다
     def __init__(self):
         self.clock = SimClock()
 
@@ -352,7 +352,7 @@ class SimFactory:                     # 시계를 자기가 들고, 장비에게
         return SimDevice(self.clock)
 
 
-class RealFactory:
+class RealSetup:
     def __init__(self):
         self.clock = RealClock()
 
@@ -372,10 +372,10 @@ def run(label, device, clock):
 
 
 run("짝 어긋남", RealDevice(), SimClock())     # 따로 만들면 이 조합이 그냥 만들어진다
-f = SimFactory()
-run("팩토리 sim", f.make_device(), f.make_clock())
-g = RealFactory()
-run("팩토리 real", g.make_device(), g.make_clock())
+f = SimSetup()
+run("묶음 sim", f.make_device(), f.make_clock())
+g = RealSetup()
+run("묶음 real", g.make_device(), g.make_clock())
 ```
 ```cpp title="짝을 한 곳에서 만든다"
 #include <iostream>
@@ -405,7 +405,7 @@ struct Device {
     virtual string read() = 0;
 };
 struct SimDevice : Device {
-    shared_ptr<SimClock> clock;       // 시계를 팩토리와 공유한다 → shared_ptr
+    shared_ptr<SimClock> clock;       // 시계를 만든 쪽과 공유한다 → shared_ptr
     explicit SimDevice(shared_ptr<SimClock> c) : clock(std::move(c)) {}
     string read() override {
         clock->t += 10;               // 시뮬 장비가 시뮬 시계를 민다
@@ -416,17 +416,17 @@ struct RealDevice : Device {
     string read() override { return "real"; }
 };
 
-struct Factory {                      // 시계를 자기가 들고, 장비에게도 그 시계를 준다
-    virtual ~Factory() = default;
+struct Setup {                      // 시계를 자기가 들고, 장비에게도 그 시계를 준다
+    virtual ~Setup() = default;
     virtual shared_ptr<Clock> make_clock() = 0;
     virtual unique_ptr<Device> make_device() = 0;
 };
-struct SimFactory : Factory {
+struct SimSetup : Setup {
     shared_ptr<SimClock> clock = make_shared<SimClock>();
     shared_ptr<Clock> make_clock() override { return clock; }
     unique_ptr<Device> make_device() override { return make_unique<SimDevice>(clock); }
 };
-struct RealFactory : Factory {
+struct RealSetup : Setup {
     shared_ptr<RealClock> clock = make_shared<RealClock>();
     shared_ptr<Clock> make_clock() override { return clock; }
     unique_ptr<Device> make_device() override { return make_unique<RealDevice>(); }
@@ -446,32 +446,32 @@ int main() {
     SimClock loose_clock;
     run("짝 어긋남", loose_device, loose_clock);
 
-    SimFactory f;
+    SimSetup f;
     auto fd = f.make_device();
     auto fc = f.make_clock();
-    run("팩토리 sim", *fd, *fc);
+    run("묶음 sim", *fd, *fc);
 
-    RealFactory g;
+    RealSetup g;
     auto gd = g.make_device();
     auto gc = g.make_clock();
-    run("팩토리 real", *gd, *gc);
+    run("묶음 real", *gd, *gc);
     return 0;
 }
 ```
 :::
 
-**복잡도:** 생성 시간 $O(P)$ — 제품 종류 $P$개를 한 번씩 만든다. 여기서 중요한 것은 복잡도가 아니라 **가능한 조합의 수다.** 따로 만들면 $2^P$가지가 컴파일되고 그중 대부분이 틀렸다. 묶으면 팩토리 구현 수만큼, 즉 유효한 조합만 존재한다.
+**복잡도:** 생성 시간 $O(P)$ — 제품 종류 $P$개를 한 번씩 만든다. 여기서 중요한 것은 복잡도가 아니라 **가능한 조합의 수다.** 따로 만들면 $2^P$가지가 컴파일되고 그중 대부분이 틀렸다. 묶으면 묶음 구현 수만큼, 즉 유효한 조합만 존재한다.
 
 ```console
 [짝 어긋남] real t=0 | real t=0 | real t=0
-[팩토리 sim] sim t=10 | sim t=20 | sim t=30
-[팩토리 real] real t=10 | real t=20 | real t=30
+[묶음 sim] sim t=10 | sim t=20 | sim t=30
+[묶음 real] real t=10 | real t=20 | real t=30
 ```
 
 **첫 줄의 `t=0` 이 멈춰 있다.** 실기 장비는 시뮬 시계를 밀지 않고 시뮬 시계는 스스로 흐르지 않으므로, 시간이 영원히 0이다. 이 상태에서는 **타임아웃 판정이 절대 발동하지 않는다.** 장비가 응답하지 않아도 시스템은 영원히 기다린다. 두 객체는 각각 완벽하게 동작하고, 틀린 것은 조합뿐이다.
 
 ::: note
-Python 은 덕 타이핑이라 `Factory` 인터페이스를 선언하지 않았다. `make_clock` 과 `make_device` 만 있으면 어떤 객체든 팩토리다. **그런데 팩토리 객체 자체는 사라지지 않았다.** 일관성은 타입의 문제가 아니라 "두 물건이 같은 상태를 공유해야 한다"는 문제이고, 그 상태를 담을 무언가가 필요하기 때문이다. 언어가 지워 주는 것은 인터페이스 선언이지 객체가 아니다.
+Python 은 덕 타이핑이라 `Setup` 인터페이스를 선언하지 않았다. `make_clock` 과 `make_device` 만 있으면 어떤 객체든 이 자리에 들어간다. **그런데 만드는 객체 자체는 사라지지 않았다.** 일관성은 타입의 문제가 아니라 "두 물건이 같은 상태를 공유해야 한다"는 문제이고, 그 상태를 담을 무언가가 필요하기 때문이다. 언어가 지워 주는 것은 인터페이스 선언이지 객체가 아니다.
 :::
 
 ::: danger
@@ -538,14 +538,14 @@ void show(const string& label, const Config& c) {
          << " tls=" << (c.tls ? "on" : "off") << "\n";
 }
 
-class ConfigBuilder {                   // 조립 중인 것과 완성된 것을 타입으로 가른다
+class ConfigDraft {                   // 조립 중인 것과 완성된 것을 타입으로 가른다
     Config c_;
 public:
-    explicit ConfigBuilder(string host) { c_.host = std::move(host); }
-    ConfigBuilder& port(int v) { c_.port = v; return *this; }
-    ConfigBuilder& timeout_ms(int v) { c_.timeout_ms = v; return *this; }
-    ConfigBuilder& retries(int v) { c_.retries = v; return *this; }
-    ConfigBuilder& tls(bool v) { c_.tls = v; return *this; }
+    explicit ConfigDraft(string host) { c_.host = std::move(host); }
+    ConfigDraft& port(int v) { c_.port = v; return *this; }
+    ConfigDraft& timeout_ms(int v) { c_.timeout_ms = v; return *this; }
+    ConfigDraft& retries(int v) { c_.retries = v; return *this; }
+    ConfigDraft& tls(bool v) { c_.tls = v; return *this; }
     Config build() const {              // 생성이 끝나는 지점 = 검증할 자리
         if (c_.port < 1 || c_.port > 65535)
             throw invalid_argument("port 는 1..65535 여야 한다");
@@ -557,9 +557,9 @@ int main() {
     Config swapped{"plc.local", 502, 3, 50, false};  // timeout 과 retries 를 바꿔 넣었다
     show("위치 인자", swapped);
     show("이름 붙은 인자",
-         ConfigBuilder("plc.local").timeout_ms(50).retries(3).tls(true).build());
+         ConfigDraft("plc.local").timeout_ms(50).retries(3).tls(true).build());
     try {
-        ConfigBuilder("plc.local").port(0).build();
+        ConfigDraft("plc.local").port(0).build();
     } catch (const invalid_argument& e) {
         cout << "[검증] " << e.what() << "\n";
     }
@@ -571,11 +571,11 @@ int main() {
 | 언어 차이 | Python | C++ |
 |---|---|---|
 | 위치 인자 실수 | `kw_only=True` 로 **언어가 막는다**. 출력 1행이 `TypeError` | 막을 방법이 없다. 자리를 바꿔도 컴파일되고 출력 1행이 틀린 설정 |
-| 인자에 이름 붙이기 | 호출부에서 `timeout_ms=50` | 이름이 없다. 빌더의 **메서드 이름**이 그 역할을 대신한다 |
+| 인자에 이름 붙이기 | 호출부에서 `timeout_ms=50` | 이름이 없다. 조립기의 **메서드 이름**이 그 역할을 대신한다 |
 | 기본값 | 필드 선언에 `= 502` | 멤버 초기화자 `= 502`. 다만 집합체 초기화로 우회된다 |
 | 불변성 | `frozen=True` 가 대입을 막는다 | `build()` 가 값을 돌려주고, 원하면 멤버를 `const` 로 |
 | 검증 자리 | `__post_init__` — 생성자가 끝나는 지점 | `build()` — 조립기와 완성품이 다른 타입이므로 그 경계가 곧 검증 지점 |
-| 필요한 코드 | `Config` 정의 **11줄** | `Config` 7줄 + 빌더 14줄 = **21줄** |
+| 필요한 코드 | `Config` 정의 **11줄** | `Config` 7줄 + 조립기 14줄 = **21줄** |
 
 **복잡도:** 조립 시간 $O(F)$ — 채우는 필드 수만큼 호출이 일어난다. 공간은 완성품 하나분에 조립기 하나분이 더 붙는다. C++ 판은 `build()` 가 `Config` 를 값으로 복사하므로, 설정 객체가 크면 이동 생성자를 쓰거나 `build() &&` 로 소유권을 넘긴다.
 
@@ -595,12 +595,12 @@ int main() {
 
 **첫 줄이 이 챕터의 핵심 장면이다.** 같은 실수 — `timeout_ms=50, retries=3` 을 자리 바꿔 쓴 것 — 를 Python 은 `TypeError` 로 막았고 C++ 은 조용히 받아들여 `timeout=3ms retries=50` 이라는 틀린 설정을 만들었다. 3ms 타임아웃은 어떤 장비도 통과하지 못하고, 50회 재시도는 장애 시 복구를 50배 느리게 만든다. **둘 다 잘 컴파일된 코드다.**
 
-**빌더 코드의 절반은 Python 에서 언어 기능으로 사라진다.** 남는 절반은 사라지지 않는다 — `__post_init__` 의 검증이 그것이다. 조립 중인 상태와 완성 상태를 가르는 일 자체는 언어가 대신해 주지 않고, 다만 그 경계를 **생성자가 끝나는 순간**으로 옮겨 놓았을 뿐이다.
+**조립기 코드의 절반은 Python 에서 언어 기능으로 사라진다.** 남는 절반은 사라지지 않는다 — `__post_init__` 의 검증이 그것이다. 조립 중인 상태와 완성 상태를 가르는 일 자체는 언어가 대신해 주지 않고, 다만 그 경계를 **생성자가 끝나는 순간**으로 옮겨 놓았을 뿐이다.
 
 ::: pitfall
 - **`kw_only=True` 없이 `frozen=True` 만 쓰면 절반만 얻는다.** 위치 인자가 허용되므로 자리 바꿈 버그가 그대로 살아 있다. 필드가 넷을 넘으면 항상 같이 쓴다.
-- **빌더의 `build()` 를 여러 번 부르면** 같은 조립기에서 여러 설정이 나온다. 조립기 상태가 남아 있으므로 두 번째 호출이 첫 번째의 설정을 물려받는다. 의도한 것이 아니면 `build() &&` 로 한 번만 부르게 강제한다.
-- **C++ 의 집합체 초기화가 빌더를 우회한다.** `Config{...}` 가 여전히 가능하므로 빌더는 규율일 뿐 강제가 아니다. 강제하려면 생성자를 `private` 으로 두고 빌더를 `friend` 로 만든다.
+- **조립기의 `build()` 를 여러 번 부르면** 같은 조립기에서 여러 설정이 나온다. 조립기 상태가 남아 있으므로 두 번째 호출이 첫 번째의 설정을 물려받는다. 의도한 것이 아니면 `build() &&` 로 한 번만 부르게 강제한다.
+- **C++ 의 집합체 초기화가 조립기를 우회한다.** `Config{...}` 가 여전히 가능하므로 조립기는 규율일 뿐 강제가 아니다. 강제하려면 생성자를 `private` 으로 두고 조립기를 `friend` 로 만든다.
 - **검증을 조립 중에 하면 순서 의존이 생긴다.** `port` 와 `tls` 를 함께 봐야 하는 규칙("tls 면 포트는 502가 아니어야 한다")은 마지막 한 번에만 검사할 수 있다.
 :::
 
