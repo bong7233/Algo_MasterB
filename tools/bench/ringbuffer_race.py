@@ -1,11 +1,16 @@
 """링 버퍼에 생산자가 둘이 되는 순간 (Python).
 
-링 버퍼는 생산자 하나·소비자 하나(SPSC)일 때만 락 없이 성립한다.
-생산자가 둘이 되면 `head` 갱신이 LOAD/ADD/STORE 세 조각으로 나뉘고
-그 사이에 스레드가 갈리면 두 스레드가 같은 슬롯에 쓴다.
+링 버퍼가 락 없이 성립하는 것은 생산자 하나·소비자 하나(SPSC)일 때뿐이다.
+생산자가 둘이면 `head` 갱신이 LOAD/ADD/STORE 로 나뉘고, 그 사이에서 스레드가
+갈리면 두 생산자가 같은 슬롯에 쓴다.
 
-GIL 이 있어도 이 경쟁은 일어난다 — GIL 은 바이트코드 사이에서 풀리기 때문이다.
-`sys._is_gil_enabled()` 로 이 인터프리터의 GIL 상태를 함께 찍는다.
+여기서 재는 것은 두 가지다.
+  1. 순수한 인덱스 갱신만 있는 판 — CPython 3.13 은 스위치 지점이 특정 명령
+     (RESUME / JUMP_BACKWARD / CALL 등)에만 있어서 이 구간이 잘 안 갈린다.
+  2. 임계 구간 안에 함수 호출이 하나 낀 판 — 호출이 곧 스위치 지점이라 갈린다.
+
+즉 "GIL 이 있으니 안전하다" 는 언어의 보장이 아니라 구현 세부에 기댄 착각이고,
+코드 한 줄로 무너진다. 그 사실을 100회 반복의 재현율로 적는다.
 
 측정 환경: CLAUDE.md §1-3 (Ubuntu 24.04 / CPython 3.13.12 / 4 코어).
 실행: python3.13 tools/bench/ringbuffer_race.py
@@ -14,41 +19,37 @@ GIL 이 있어도 이 경쟁은 일어난다 — GIL 은 바이트코드 사이�
 import sys
 import threading
 
-CAP = 1 << 16
-PER_THREAD = 20_000
-ROUNDS = 200
+CAP = 1 << 20
+ROUNDS = 100
 
 
-class RingUnsafe:
-    def __init__(self, cap):
+def tag(x):
+    """실무의 push 안에 흔히 들어가는 한 줄 — 타임스탬프·시퀀스 부여·포맷.
+    호출 하나가 임계 구간에 스위치 지점을 만든다."""
+    return x
+
+
+class Ring:
+    def __init__(self, cap, hooked):
         self.buf = [0] * cap
         self.cap = cap
         self.head = 0
+        self.hooked = hooked
 
     def push(self, x):
-        h = self.head                    # LOAD
-        self.buf[h] = x                  # STORE (슬롯)
-        self.head = (h + 1) % self.cap   # ADD + STORE (인덱스)
+        h = self.head
+        self.buf[h] = tag(x) if self.hooked else x
+        self.head = (h + 1) % self.cap
 
 
-class RingLocked(RingUnsafe):
-    def __init__(self, cap):
-        super().__init__(cap)
-        self.lk = threading.Lock()
-
-    def push(self, x):
-        with self.lk:
-            super().push(x)
-
-
-def one_round(cls, threads=2):
-    q = cls(CAP)
+def one_round(per, hooked, nthreads=2):
+    q = Ring(CAP, hooked)
 
     def work():
-        for _ in range(PER_THREAD):
+        for _ in range(per):
             q.push(1)
 
-    ts = [threading.Thread(target=work) for _ in range(threads)]
+    ts = [threading.Thread(target=work) for _ in range(nthreads)]
     for t in ts:
         t.start()
     for t in ts:
@@ -56,20 +57,22 @@ def one_round(cls, threads=2):
     return q.head, sum(q.buf)
 
 
-def survey(cls, name):
+def survey(per, hooked, label):
     bad = 0
-    worst = 0
-    expected = PER_THREAD * 2
+    got_total = 0
+    want = per * 2
     for _ in range(ROUNDS):
-        head, total = one_round(cls)
-        if head != expected or total != expected:
+        head, written = one_round(per, hooked)
+        got_total += written
+        if head != want or written != want:
             bad += 1
-            worst = max(worst, expected - min(head, total))
-    print(f"{name:10s} {ROUNDS}회 중 {bad}회 어긋남  (기대 {expected}, 최대 유실 {worst})")
-    return bad
+    print(f"{label:34s} {bad:3d}/{ROUNDS} 회 어긋남   "
+          f"평균 기록량 {got_total / ROUNDS:8.0f} / {want}")
 
 
 if __name__ == "__main__":
-    print("GIL 켜짐:", sys._is_gil_enabled(), " / 코어 4 / 생산자 스레드 2")
-    survey(RingUnsafe, "락 없음")
-    survey(RingLocked, "락 있음")
+    print("GIL 켜짐:", sys._is_gil_enabled(),
+          "/ 스위치 간격", sys.getswitchinterval(), "초 / 코어 4 / 생산자 2")
+    survey(20_000, False, "호출 없는 push, 2만 회")
+    survey(20_000, True, "호출 낀 push, 2만 회")
+    survey(200_000, True, "호출 낀 push, 20만 회")

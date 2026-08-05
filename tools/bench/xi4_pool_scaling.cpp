@@ -1,7 +1,7 @@
 // 스레드 풀의 배수와 중앙 큐의 경합 — XI-4.
 //
 // (1) CPU 바운드 작업을 1워커 / 4워커로 나눴을 때의 배수 (코어 4)
-// (2) 아주 작은 작업 20만 개를 중앙 큐 하나로 돌릴 때와
+// (2) 아주 작은 작업 200만 개를 중앙 큐 하나로 돌릴 때와
 //     워커마다 덱을 두고 훔치게 할 때의 시간
 //
 // 5회 실행해 중앙값과 범위를 낸다.
@@ -21,8 +21,8 @@
 using namespace std;
 
 const int CHUNKS = 8;
-const long long CPU_WORK = 30000000;   // 청크 하나의 반복 횟수
-const int TINY = 200000;               // 아주 작은 작업의 개수
+const long long CPU_WORK = 200000000;   // 청크 하나의 반복 횟수
+const int TINY = 2000000;               // 아주 작은 작업의 개수
 const int REPS = 5;
 
 atomic<long long> sink{0};
@@ -148,7 +148,7 @@ int main() {
     report("워커 1", a);
     report("워커 4", b, base);
 
-    puts("\n-- 아주 작은 작업 20만 개, 워커 4 --");
+    puts("\n-- 아주 작은 작업 200만 개, 워커 4 --");
     report("중앙 큐 하나", c);
     report("워커별 덱 + 훔치기", d, median_of(c));
     return 0;
