@@ -131,7 +131,7 @@ def main():
     print(f"닫힌 구간 최대 겹침 — 끝(-1)  먼저 : {trials}회, 불일치 {end_bad}건 (틀려야 정상)")
     print(f"두 순서가 실제로 답이 갈린 입력    : {differ}건")
 
-    segs = [(1, 5), (2, 6), (4, 7), (8, 9)]
+    segs = [(1, 5), (2, 6), (4, 7), (7, 9)]
     print(f"본문 손추적 segs={segs}")
     print(f"  스위핑    (최대겹침, 길이, 덩어리) = {sweep(segs)}")
     print(f"  브루트포스(최대겹침, 길이, 덩어리) = {brute(segs)}")
