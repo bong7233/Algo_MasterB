@@ -2,7 +2,6 @@
 
 ::: lead
 객체를 만드는 일이 복잡해질 때, 그 복잡함은 서로 다른 세 가지이고 처방도 세 가지다.
-
 :::
 
 ## 1. 문제
@@ -621,10 +620,10 @@ int main() {
 **Abstract Factory** — 서로 관련된 제품들의 **군(family)** 을 만드는 인터페이스. 구현 하나가 한 군을 담당한다.
 
 ```text nolines
-  AbstractFactory        <- makeClock(), makeDevice()
+  AbstractFactory        <- makeClock(), makeDevice(). 3.3 의 Setup 이 이것이다
       ^
-      +-- SimFactory     <- 시뮬 군 전체를 담당한다
-      +-- RealFactory    <- 실기 군 전체를 담당한다
+      +-- SimSetup       <- 시뮬 군 전체를 담당한다
+      +-- RealSetup      <- 실기 군 전체를 담당한다
 ```
 
 **이 패턴의 존재 이유는 제품이 여럿이라는 것이 아니라 제품들이 서로 맞아야 한다는 것이다.** 3.3의 `t=0` 이 그 제약이 깨졌을 때의 모습이다. 일관성 제약이 없다면 Abstract Factory 는 그냥 함수 두 개를 클래스로 감싼 것이고, 그때는 쓰지 않는 것이 맞다.
