@@ -10638,7 +10638,7 @@ window.Widgets = window.Widgets || {};
       }
       if (!f || !on || !to || idx[f] === undefined || idx[to] === undefined) { dropped++; continue; }
       on = clip(on, MAX_LABEL);
-      var key = f + ' ' + on;
+      var key = f + '\u0000' + on;   // 상태 이름에 공백이 있어도 키가 섞이지 않는다
       if (tseen[key]) { dropped++; continue; }   // (상태, 이벤트) 는 결정적이어야 한다
       tseen[key] = true;
       if (!evSeen[on]) {
@@ -11023,8 +11023,28 @@ window.Widgets = window.Widgets || {};
       var len = Math.sqrt(dx * dx + dy * dy) || 1;
       var px = dy / len, py = -dx / len;              // 진행 방향의 수직 (오른쪽으로 갈 땐 위)
       var twoWay = !!pairSet[g.to + '>' + g.from];
+      var span = Math.abs(ns[g.to].layer - ns[g.from].layer);
 
-      var cands = twoWay ? [40, 68, 104, 150, 200] : [0, 44, -44, 78, -78, 120, -120, 170, -170, 230];
+      /* 후보 순서가 그림의 질을 정한다.
+       *   - 이웃 층끼리는 직선이 제일 낫다. 0 부터 본다.
+       *   - 왕복 쌍(running↔paused)은 0 이면 정확히 겹친다. 수직 벡터가 진행 방향을
+       *     따라 뒤집히므로 같은 양수를 줘도 서로 반대쪽으로 휜다.
+       *   - **여러 층을 건너뛰는 간선은 처음부터 크게 휘게 한다.** 작은 활로도 노드는
+       *     피할 수 있지만 라벨이 한가운데 붐비는 자리에 떨어진다. 손으로 그린 상태
+       *     기계가 먼 간선을 바깥으로 크게 돌리는 것과 같은 이유다.
+       *   - 음수(가로 배치에서는 아래, 세로 배치에서는 왼쪽)를 먼저 본다. 자기 간선
+       *     고리가 반대쪽에 걸려 있어 그쪽이 늘 비어 있다. */
+      var cands;
+      if (span >= 2) {
+        var base = 60 + 34 * span;
+        cands = [-base, base, -base * 1.4, base * 1.4, -base * 1.9, base * 1.9, -44, 44];
+      } else if (twoWay) {
+        // 활을 작게 주면 두 라벨이 가운데에서 붙어 한 덩어리로 읽힌다. 처음부터
+        // 벌려 놓는다 — 수직 벡터가 방향을 따라 뒤집히므로 양수 하나로 양쪽이 갈린다.
+        cands = [64, 96, 136, 186];
+      } else {
+        cands = [0, -44, 44, -78, 78, -120, 120, -170, 170, 230];
+      }
       var best = null;
       for (var c = 0; c < cands.length; c++) {
         var bow = cands[c];
@@ -11044,7 +11064,7 @@ window.Widgets = window.Widgets || {};
         var rct = { x: p.x - lwid / 2, y: p.y - lhei / 2, w: lwid, h: lhei };
         var ok = true, z;
         for (z = 0; z < hits.length && ok; z++) if (overlap(rct, hits[z], 1)) ok = false;
-        for (z = 0; z < labels.length && ok; z++) if (overlap(rct, labels[z], 1)) ok = false;
+        for (z = 0; z < labels.length && ok; z++) if (overlap(rct, labels[z], 7)) ok = false;
         if (ok) { placed = rct; break; }
         if (!placed) placed = rct;
       }
@@ -11135,8 +11155,9 @@ window.Widgets = window.Widgets || {};
   // 940px 이 된다). 뷰포트로 문턱을 잡으면 데스크톱에서도 영원히 세로로 쌓인다.
   var SIDE_MIN = 620;      // 이 아래로는 무조건 세로 스택
   var GRAPH_MIN = 250;     // 나란히 둘 때 그래프가 최소한 가져야 하는 폭
+  var GRAPH_WANT = 340;    // 이만큼은 그래프에 주려고 격자 칸을 먼저 줄인다
   var MIN_SIDE_CELL = 38;  // 나란히 두느라 이보다 좁아지면 이벤트 이름을 못 읽는다
-  var VERT_W = 430;        // 그래프 자체를 세로 흐름으로 뒤집는 폭
+  var LABEL_ROOM = 46;     // 층 사이에 간선 라벨이 들어가려면 최소 이만큼
 
   function computeLayout(w, model, view, showRejected) {
     var tiny = w < 520, narrow = w < 620;
@@ -11167,39 +11188,58 @@ window.Widgets = window.Widgets || {};
     var side = showG && showM && w >= SIDE_MIN;
     var graphAvail = avail;
     if (side) {
-      if (matW > avail - GRAPH_MIN - gap) {
-        // 칸을 줄여서라도 나란히 둘 수 있으면 둔다. 최소 칸 폭 아래로는 안 간다.
-        var need = avail - GRAPH_MIN - gap - labelW;
+      // 그래프 쪽이 훨씬 넓이를 탄다(노드 + 휘어진 간선 + 라벨). 격자는 칸이
+      // MIN_SIDE_CELL 까지 좁아져도 읽히므로, 남는 폭은 그래프에 몰아준다.
+      if (matW > avail - GRAPH_WANT - gap) {
+        var need = avail - GRAPH_WANT - gap - labelW;
         var shrunk = Math.floor(need / E);
-        if (shrunk >= MIN_SIDE_CELL) { cellW = shrunk; matW = labelW + E * cellW; }
-        else side = false;   // 읽히는 것이 나란히 두는 것보다 먼저다(grid-search 와 같은 판단)
+        if (shrunk < MIN_SIDE_CELL) shrunk = MIN_SIDE_CELL;
+        if (shrunk < cellW) { cellW = shrunk; matW = labelW + E * cellW; }
       }
+      // 그래도 그래프가 최소 폭을 못 받으면 나란히 두는 것을 포기한다.
+      // 읽히는 것이 나란히 두는 것보다 먼저다(grid-search 와 같은 판단).
+      if (avail - matW - gap < GRAPH_MIN) side = false;
       if (side) graphAvail = avail - matW - gap;
     }
+
+    /* 격자가 stage 보다 넓으면 오른쪽 열이 잘린다 — 캔버스 폭이 stage 폭이라
+     * 넘친 부분은 스크롤되는 것이 아니라 그냥 사라진다. 열이 잘린 격자는
+     * "어디로 갈 수 없는가"를 통째로 거짓말한다. 그래서 먼저 칸을 줄여 맞추고,
+     * 그래도 안 되면 격자 전체를 축소해서 그린다(정보는 남긴다). */
+    var mScale = 1;
+    if (matW > avail) {
+      var fit = Math.floor((avail - labelW) / E);
+      if (fit >= 16) { cellW = fit; matW = labelW + E * cellW; }
+      else mScale = Math.max(0.4, avail / matW);
+    }
+
+    // 머리글은 칸 폭 안에 들어가야 한다. 이름이 칸보다 길면 글자를 줄인다 —
+    // 이웃 열 이름과 붙어 버리면 어느 열인지 못 읽는다.
+    var headFs = Math.max(7.5, Math.min(mfs, evW > 0 ? mfs * (cellW - 5) / evW : mfs));
 
     // ---- 그래프 치수 ----
     var g = null;
     if (showG) {
-      var vertical = graphAvail < VERT_W;
       var gfs = tiny ? 9 : (narrow ? 10 : 11);
       var noteFs = tiny ? 8 : 8.8;
       var maxLabel = 0;
       for (i = 0; i < S; i++) maxLabel = Math.max(maxLabel, estW(model.states[i].label, gfs));
       var nodeW = Math.max(48, Math.ceil(maxLabel) + 16);
       var nodeH = tiny ? 23 : 27;
-      var gapMain = tiny ? 30 : 40;
       var gapCross = tiny ? 20 : 26;
 
-      // 가로 배치가 폭을 넘으면 층 간격부터 줄이고, 그래도 안 되면 세로로 뒤집는다.
-      if (!vertical) {
-        var natural = model.layers * nodeW + (model.layers - 1) * gapMain + 20;
-        if (natural > graphAvail) {
-          var slack = model.layers > 1 ? (natural - graphAvail) / (model.layers - 1) : 0;
-          gapMain = Math.max(tiny ? 18 : 22, gapMain - slack);
-          natural = model.layers * nodeW + (model.layers - 1) * gapMain + 20;
-          if (natural > graphAvail) vertical = true;
-        }
-      }
+      /* 가로로 눕힐지 세로로 세울지.
+       * 층 간격을 줄여서 억지로 가로에 맞추지 않는다 — 가로 배치에서 층 간격은
+       * **이벤트 이름이 들어갈 자리**다. 이름보다 좁아지는 순간 라벨이 양쪽 노드
+       * 상자를 덮어 그림이 통째로 죽는다. 그래서 필요한 폭을 이름에서 역산하고,
+       * 그만큼이 안 나오면 세로로 세운다. 세로는 층 간격을 높이에서 가져오므로
+       * 폭이 좁아도 라벨 자리가 남는다. */
+      var elw = 0;   // 라벨 알약의 실제 폭 (buildGraph 와 같은 식으로 잰다)
+      for (i = 0; i < model.events.length; i++) elw = Math.max(elw, estW(model.events[i], gfs) + 10);
+      var roomH = Math.min(104, Math.max(52, Math.ceil(elw) + 20));
+      var natural = model.layers * nodeW + (model.layers - 1) * roomH + 24;
+      var vertical = natural > graphAvail;
+      var gapMain = vertical ? (tiny ? 34 : LABEL_ROOM) : roomH;
       g = buildGraph(model, vertical, nodeW, nodeH, gapMain, gapCross, gfs, noteFs);
       // 그래도 넘치면 폭에 맞춰 통째로 축소한다. .wk-stage 는 overflow-x 가 되지만
       // 캔버스를 stage 보다 넓게 잡을 이유는 없다.
@@ -11216,12 +11256,10 @@ window.Widgets = window.Widgets || {};
     var gx = pad, mx = pad, gtY = 0, mtY = 0;
 
     if (side) {
-      // 세로 흐름 그래프는 격자보다 훨씬 길다. 짧은 쪽을 가운데로 올려야 두 패널이
-      // 한 덩어리로 읽힌다 — 위만 맞추면 오른쪽이 허공에 떠 보인다.
+      // 위를 맞춘다. 짧은 쪽을 가운데로 내리면 제목과 표가 떨어져 서로 남처럼 보인다.
       var band = Math.max(gh, matH);
-      gtY = mtY = y + headH - 5;      // 제목은 두 패널 위에 나란히 — 높이가 어긋나면 안 읽힌다
-      gy = y + headH + (band - gh) / 2;
-      my = y + headH + (band - matH) / 2;
+      gtY = mtY = y + headH - 5;
+      gy = my = y + headH;
       gx = pad + Math.max(0, (graphAvail - gw) / 2);
       mx = pad + graphAvail + gap;
       y = y + headH + band + (tiny ? 12 : 16);
@@ -11235,8 +11273,8 @@ window.Widgets = window.Widgets || {};
       if (showM) {
         mtY = y + headH - 5;
         my = y + headH;
-        mx = pad + Math.max(0, (avail - matW) / 2);
-        y = my + matH + (tiny ? 12 : 16);
+        mx = pad + Math.max(0, (avail - matW * mScale) / 2);
+        y = my + matH * mScale + (tiny ? 12 : 16);
       }
     }
 
@@ -11258,12 +11296,17 @@ window.Widgets = window.Widgets || {};
     var stripH = tiny ? 20 : 23;
     y = stripY + stripH + pad;
 
+    // 각주(모르는 kind, 버려진 전이)는 제 줄을 갖는다. 좁은 화면에서 현재 줄 위에
+    // 겹쳐 쓰면 둘 다 못 읽는다.
+    var foot = model.footLines || 0;
+    y += foot * (tiny ? 11 : 12);
+
     return {
       w: w, tiny: tiny, narrow: narrow, pad: pad, headH: headH, side: side,
       showG: showG, showM: showM, view: view, showRejected: showRejected,
       graph: g, gx: gx, gy: gy, gw: gw, gh: gh, gtY: gtY, mtY: mtY,
-      mx: mx, my: my, matW: matW, matH: matH,
-      labelW: labelW, cellW: cellW, cellH: cellH, mHeadH: mHeadH, mfs: mfs,
+      mx: mx, my: my, matW: matW, matH: matH, mScale: mScale,
+      labelW: labelW, cellW: cellW, cellH: cellH, mHeadH: mHeadH, mfs: mfs, headFs: headFs,
       chips: chips, tapeRows: rows, chipH: chipH, tfs: tfs,
       stripY: stripY, stripH: stripH,
       height: Math.max(120, y)
@@ -11283,6 +11326,7 @@ window.Widgets = window.Widgets || {};
     var kind = str(opts.kind) || 'fsm';
     var kindNote = (kind.toLowerCase() === 'fsm') ? null
       : 'kind="' + clip(kind, 10) + '" 는 아직 평면 상태 기계로 그린다 (계층·행동 트리는 XI-6)';
+    model.footLines = (kindNote ? 1 : 0) + (model.dropped ? 1 : 0);
 
     var title = str(opts.title);
 
@@ -11320,8 +11364,8 @@ window.Widgets = window.Widgets || {};
       '<span><i style="background:var(--w-frontier)"></i>현재 상태</span>' +
       '<span><i style="background:var(--w-path)"></i>방금 지난 전이</span>' +
       (showRejected ? '<span><i style="background:var(--box-danger)"></i>거부 — 격자의 빈칸(×)</span>' : '') +
-      (model.showMatrix ? '<span>격자: <b>O</b> 전이 있음 · <b>·</b> 없음 (빈칸이 곧 규칙이다)</span>' : '') +
-      (model.flagName ? '<span>' + model.flagName + '은 상태의 함수다 — 진입 동작 한 곳에서만 바뀐다</span>' : '');
+      (model.showMatrix ? '<span>격자: <b>●</b> 전이 있음 / 빈칸 = 전이 없음 (빈칸이 곧 규칙이다)</span>' : '') +
+      (model.flagName ? '<span>' + eun(model.flagName) + ' 상태의 함수다 — 진입 동작 한 곳에서만 바뀐다</span>' : '');
     ui.slot.appendChild(legend);
 
     function L() {
@@ -11495,10 +11539,16 @@ window.Widgets = window.Widgets || {};
     // ---- 격자 ----
     function drawMatrix(ctx, T, l, s) {
       var S = model.states.length, E = model.events.length;
-      var x0 = l.mx, y0 = l.my;
       var i, j;
+      // 축소가 걸린 경우를 위해 격자는 자기 좌표계에서 그린다.
+      ctx.save();
+      ctx.translate(l.mx, l.my);
+      if (l.mScale !== 1) ctx.scale(l.mScale, l.mScale);
+      var x0 = 0, y0 = 0;
 
-      // 현재 행·열 띠. 격자에서 "지금 어느 줄을 보는가"가 먼저 읽혀야 한다.
+      // 띠 두 개. 가로는 **지금 있는 상태의 행**(여기서 다음 이벤트를 조회한다),
+      // 세로는 방금 던진 이벤트의 열이다. 둘이 만나는 칸이 조회 지점이고,
+      // 전이가 일어난 스텝에서는 행이 한 칸 옮겨 간 것이 눈에 보인다.
       ctx.save();
       ctx.globalAlpha = 0.10;
       ctx.fillStyle = T.wFrontier;
@@ -11507,9 +11557,9 @@ window.Widgets = window.Widgets || {};
       ctx.restore();
 
       // 헤더
-      ctx.font = l.mfs + 'px ' + MONO;
       ctx.textBaseline = 'middle';
       for (j = 0; j < E; j++) {
+        ctx.font = ((j === s.ei) ? '700 ' : '') + l.headFs + 'px ' + MONO;
         ctx.fillStyle = (j === s.ei) ? T.fg : T.fgDim;
         ctx.textAlign = 'center';
         ctx.fillText(model.events[j], x0 + l.labelW + (j + 0.5) * l.cellW, y0 + l.mHeadH / 2);
@@ -11535,7 +11585,10 @@ window.Widgets = window.Widgets || {};
           var open = model.matrix[i][j] >= 0;
           var key = i + ':' + j;
           var wasUsed = !!s.used[key], wasRej = !!s.rej[key];
-          var isNow = (s.state === i && s.ei === j && (s.kind === 'move' || s.kind === 'reject'));
+          // 조회가 일어난 칸은 **떠나온 상태의 행**이다. 도착한 행이 아니다.
+          // (paused, resume) 를 조회해서 running 으로 갔다면 켜져야 하는 칸은
+          // paused 행이고, running 행에는 아무 일도 없었다.
+          var isNow = (s.from === i && s.ei === j && (s.kind === 'move' || s.kind === 'reject'));
 
           // 열린 칸은 옅은 채움 + 글자 O. 색을 못 보는 독자에게도 O/· 로 구분된다.
           if (open) {
@@ -11555,12 +11608,15 @@ window.Widgets = window.Widgets || {};
             ctx.restore();
           }
 
-          var glyph = open ? 'O' : '·';
+          // 글자로도 구분된다(계약 §5). 본문 §4.2 의 콘솔 표는 O / . 를 쓰지만
+          // 화면에서 O 는 숫자 0 으로 읽혀 "열려 있음"과 정반대의 인상을 준다.
+          // 그래서 채운 점과 작은 점으로 바꿨다. 패턴은 콘솔 표와 한 칸씩 같다.
+          var glyph = open ? '●' : '·';
           var col = T.fgFaint;
           if (open) col = isNow ? T.wPath : (wasUsed ? T.fg : T.fgDim);
           if (!open && (wasRej || (isNow && !open))) { glyph = '×'; col = T.boxDanger; }
           ctx.fillStyle = col;
-          ctx.font = ((isNow || (open && wasUsed)) ? '700 ' : '') + (l.mfs + 1) + 'px ' + MONO;
+          ctx.font = ((isNow || (open && wasUsed)) ? '700 ' : '') + (open ? l.mfs : l.mfs + 1) + 'px ' + MONO;
           ctx.textAlign = 'center';
           ctx.globalAlpha = (!open && wasRej && !isNow) ? 0.6 : 1;
           ctx.fillText(glyph, cxx + l.cellW / 2, ry + l.cellH / 2);
@@ -11595,6 +11651,7 @@ window.Widgets = window.Widgets || {};
       ctx.textBaseline = 'top';
       ctx.fillText('열린 칸 ' + model.filled + ' · 빈칸 ' + (total - model.filled) + ' / 전체 ' + total,
                    x0, y0 + l.mHeadH + S * l.cellH + 4);
+      ctx.restore();
     }
 
     // ---- 스크립트 테이프 + 현재 줄 ----
