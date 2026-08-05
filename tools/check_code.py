@@ -101,11 +101,20 @@ def dual_blocks(md: str) -> list[tuple[int, dict[str, str]]]:
     return out
 
 
-def has_diff_table(md: str, after_line: int, window: int = 90) -> bool:
-    """블록 뒤에 '언어 차이' 표가 있는가. 있으면 선언된 차이로 본다."""
+def has_diff_table(md: str, after_line: int, max_scan: int = 400) -> bool:
+    """블록 뒤에 '언어 차이' 표가 있는가. 있으면 선언된 차이로 본다.
+
+    줄 수로 자르면 안 된다. 코드가 길거나 console 블록·복잡도 서술이 사이에 끼면
+    표가 100줄 넘게 밀리는데, 그것은 표가 없는 것이 아니라 챕터가 두꺼운 것이다.
+    **다음 ::: dual 이 나오기 전까지**가 이 블록의 영역이다 — 그 뒤의 표는 남의 것이다.
+    """
     lines = md.split("\n")
-    chunk = "\n".join(lines[after_line : after_line + window])
-    return "언어 차이" in chunk
+    end = min(len(lines), after_line + max_scan)
+    for i in range(after_line, end):
+        if lines[i].strip() == "::: dual":
+            end = i
+            break
+    return "언어 차이" in "\n".join(lines[after_line:end])
 
 
 # 생략 표시가 있는 줄은 대조하지 않는다. 챕터가 긴 출력의 앞부분만 싣는 것은
@@ -228,12 +237,14 @@ def main() -> int:
 
             # 본문에 실린 출력과 실제 출력의 대조. 두 언어가 서로 일치하는 것만으로는
             # 지면의 숫자가 최신이라는 보장이 되지 않는다.
-            actual = outs.get("python") or outs.get("cpp")
-            if actual and not declared:
+            cands = [v for v in (outs.get("python"), outs.get("cpp")) if v]
+            if cands:
                 found = next_console_block(md, line)
                 if found:
                     cline, shown = found
-                    missing = console_mismatches(actual, shown)
+                    # 언어 차이가 선언된 블록은 언어별 console 블록을 둘 두는 것이 정상이다.
+                    # 어느 한쪽과도 안 맞을 때만 지면이 낡은 것이다.
+                    missing = min((console_mismatches(a, shown) for a in cands), key=len)
                     if missing:
                         stale += 1
                         print(f"{rel}:{cline}: 본문 console 블록에 실제 출력에 없는 줄이 있다")

@@ -8160,6 +8160,552 @@ window.Widgets = window.Widgets || {};
   });
 })();
 
+/* ==== kdtree-nn.js ==== */
+/* kdtree-nn.js — 원이 분할선에 닿지 않으면 그 너머는 안 본다
+ *
+ * 이 위젯이 가르치려는 단 하나:
+ *   **가지치기의 근거는 기하 하나다 — 질의점에서 분할선까지의 거리가 현재 최선
+ *   거리보다 멀면, 그 선 너머에는 더 가까운 점이 있을 수 없다.**
+ *   원이 선에 닿지 않는 그림이 곧 "이 가지는 안 본다"는 증명이다.
+ *
+ * 그래서 이 위젯의 중심은 트리 그림이 아니라 **원과 분할선의 관계**다.
+ *   트리를 예쁘게 그리는 것은 쉽지만, 독자가 실제로 못 하는 것은
+ *   "왜 저 가지를 안 봐도 되는가"를 말하는 일이다. 원이 선을 넘는 순간과
+ *   넘지 않는 순간을 같은 화면에서 보여야 그 판정이 손에 잡힌다.
+ *
+ * 왜 카운터에 전수 비교를 나란히 두는가
+ *   방문 노드 수만 보면 "빠르다"가 느낌으로 남는다. 전수 비교의 n 과 나란히
+ *   세어야 이득이 수치가 된다. 그리고 **차원이 오르면 이 비율이 1에 수렴한다** —
+ *   그 사실을 같은 카운터로 확인할 수 있어야 차원의 저주가 경고문이 아니라 관측이 된다.
+ *
+ * 왜 질의점 쪽으로 먼저 내려가는 것을 스텝으로 보이는가
+ *   순서를 바꿔도 답은 맞는다. 틀리는 것은 속도다 — 좋은 후보를 늦게 잡으면
+ *   원이 늦게 줄어들고 가지치기가 거의 안 먹힌다. **정확성이 아니라 속도가
+ *   순서에 달려 있다**는 것이 이 알고리즘에서 가장 자주 오해되는 지점이라
+ *   탭으로 뒤집어 볼 수 있게 뒀다.
+ *
+ * ── opts (챕터가 넘기는 것. 이 주석이 명세다) ────────────────────────────────
+ *   points     : [[x,y], ...] 2~64개. 기본 7개 예제
+ *   query      : [x,y] 질의점. 기본 [7,7]
+ *   extent     : [xmin,xmax,ymin,ymax] 평면 범위. 생략하면 점에서 자동 산출
+ *   split      : "median" (기본). 축 중앙값으로 가른다
+ *   axisOrder  : "round-robin" (기본) — 깊이마다 x,y 를 번갈아 쓴다
+ *   order      : "near-first" (기본) | "far-first" — 어느 쪽으로 먼저 내려갈 것인가.
+ *                둘 다 정답을 내지만 가지치기 효율이 갈린다. 탭으로 제공된다
+ *   show       : ["partition","tree","radius","counters"] 중 원하는 것. 기본 전부
+ *   counters   : ["visited","pruned","bruteforce"] 중 원하는 것. 기본 전부
+ *   highlightPrune   : true(기본) — 잘라 낸 가지를 회색으로 죽인다
+ *   compareBruteforce: true(기본) — 전수 비교의 답과 대조해 일치를 표시한다
+ *   dim        : 2 만 지원한다. 다른 값을 넘기면 2 로 두고 제목에 적는다
+ *
+ * 넘긴 값이 무엇이든 던지지 않는다(계약 §1). 범위를 벗어나면 잘라 쓰고 제목에 밝힌다.
+ */
+(function () {
+  'use strict';
+
+  var K = window.WidgetKit;
+  if (!K) return;
+
+  var MAX_PTS = 64;
+  var FONT = '-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif';
+  var MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace';
+
+  var DFLT_PTS = [[2, 3], [5, 4], [9, 6], [4, 7], [8, 1], [7, 2], [6, 9]];
+
+  function isArr(v) {
+    return !!v && typeof v === 'object' && typeof v.length === 'number' && typeof v !== 'string';
+  }
+
+  function num(v, d) {
+    var n = (typeof v === 'number') ? v : parseFloat(v);
+    return isFinite(n) ? n : d;
+  }
+
+  function toPoints(v) {
+    if (!isArr(v)) return DFLT_PTS.map(function (p) { return p.slice(); });
+    var out = [];
+    for (var i = 0; i < v.length && out.length < MAX_PTS; i++) {
+      var p = v[i];
+      if (!isArr(p) || p.length < 2) continue;
+      var x = num(p[0], NaN), y = num(p[1], NaN);
+      if (isFinite(x) && isFinite(y)) out.push([x, y]);
+    }
+    return out.length >= 2 ? out : DFLT_PTS.map(function (p) { return p.slice(); });
+  }
+
+  function rrect(ctx, x, y, w, h, r) {
+    r = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  function dist2(a, b) {
+    var dx = a[0] - b[0], dy = a[1] - b[1];
+    return dx * dx + dy * dy;
+  }
+
+  // ─── 트리 만들기 ─────────────────────────────────────────────────────────
+  //
+  // 중앙값으로 가르므로 뭉친 곳은 잘게, 빈 곳은 성기게 잘린다.
+  // 셀 크기를 미리 정하는 그리드와 갈리는 지점이 정확히 여기다.
+
+  function build(pts, depth, box) {
+    if (!pts.length) return null;
+    var axis = depth % 2;
+    var sorted = pts.slice().sort(function (a, b) { return a[axis] - b[axis]; });
+    var mid = Math.floor(sorted.length / 2);
+    var node = {
+      point: sorted[mid], axis: axis, depth: depth, box: box,
+      left: null, right: null, id: null
+    };
+    var lo = box.slice(), hi = box.slice();
+    if (axis === 0) { lo[1] = sorted[mid][0]; hi[0] = sorted[mid][0]; }
+    else { lo[3] = sorted[mid][1]; hi[2] = sorted[mid][1]; }
+    node.left = build(sorted.slice(0, mid), depth + 1, lo);
+    node.right = build(sorted.slice(mid + 1), depth + 1, hi);
+    return node;
+  }
+
+  function numberNodes(root) {
+    var n = 0;
+    (function walk(t) {
+      if (!t) return;
+      t.id = n++;
+      walk(t.left); walk(t.right);
+    })(root);
+    return n;
+  }
+
+  /* 최근접 탐색을 스텝 목록으로 편다.
+   * 각 스텝은 그리기에 필요한 것을 전부 담는다 — 그리는 쪽에서 계산하지 않아야
+   * 되감기가 결정적이다(런타임 주석). */
+  function search(root, q, nearFirst, total) {
+    var steps = [];
+    var best = null, bestD2 = Infinity;
+    var visited = 0, pruned = 0;
+    var deadSet = {};        // 잘라 낸 서브트리의 노드 id
+
+    function killSubtree(t) {
+      if (!t) return;
+      deadSet[t.id] = true;
+      killSubtree(t.left); killSubtree(t.right);
+    }
+
+    function snap(kind, node, note, extra) {
+      var s = {
+        kind: kind, nodeId: node ? node.id : null,
+        best: best ? best.slice() : null, bestD2: bestD2,
+        visited: visited, pruned: pruned,
+        dead: Object.keys(deadSet).map(Number),
+        note: note
+      };
+      if (extra) for (var k in extra) s[k] = extra[k];
+      steps.push(s);
+    }
+
+    function go(t) {
+      if (!t) return;
+      visited += 1;
+      var d2 = dist2(t.point, q);
+      var improved = d2 < bestD2;
+      if (improved) { best = t.point; bestD2 = d2; }
+      snap('visit', t,
+        '노드 (' + t.point[0] + ', ' + t.point[1] + ') 방문. 거리 ' + Math.sqrt(d2).toFixed(2) +
+        (improved ? ' — 최선이 갱신됐다. 원이 줄었다.' : ' — 최선보다 멀다. 원은 그대로.'),
+        { improved: improved, curD2: d2 });
+
+      var delta = q[t.axis] - t.point[t.axis];
+      var nearSide = delta < 0 ? t.left : t.right;
+      var farSide = delta < 0 ? t.right : t.left;
+      var first = nearFirst ? nearSide : farSide;
+      var second = nearFirst ? farSide : nearSide;
+
+      go(first);
+
+      // 가지치기 판정 — 이 위젯의 본문이다.
+      var planeD2 = delta * delta;
+      if (second) {
+        if (planeD2 < bestD2) {
+          snap('cross', t,
+            '분할선까지 ' + Math.abs(delta).toFixed(2) + ' < 최선 ' + Math.sqrt(bestD2).toFixed(2) +
+            ' — 원이 선을 넘었다. 반대쪽도 봐야 한다.',
+            { axis: t.axis, planeAt: t.point[t.axis] });
+          go(second);
+        } else {
+          var cnt = 0;
+          (function count(x) { if (!x) return; cnt++; count(x.left); count(x.right); })(second);
+          pruned += cnt;
+          killSubtree(second);
+          snap('prune', t,
+            '분할선까지 ' + Math.abs(delta).toFixed(2) + ' ≥ 최선 ' + Math.sqrt(bestD2).toFixed(2) +
+            ' — 원이 선에 닿지 않는다. 저 너머에는 더 가까운 점이 없다. 노드 ' + cnt + '개를 통째로 건너뛴다.',
+            { axis: t.axis, planeAt: t.point[t.axis], prunedNow: cnt });
+        }
+      }
+    }
+
+    snap('init', null, '질의점에서 시작한다. 아직 최선이 없어 원은 무한대다.');
+    go(root);
+    snap('done', null,
+      '최근접 (' + best[0] + ', ' + best[1] + '), 거리 ' + Math.sqrt(bestD2).toFixed(2) +
+      '. 방문 ' + visited + ' / 전수 비교 ' + total + ', 건너뛴 노드 ' + pruned + '.');
+    return { steps: steps, best: best, bestD2: bestD2, visited: visited, pruned: pruned };
+  }
+
+  function bruteforce(pts, q) {
+    var best = null, bd = Infinity;
+    for (var i = 0; i < pts.length; i++) {
+      var d = dist2(pts[i], q);
+      if (d < bd) { bd = d; best = pts[i]; }
+    }
+    return { best: best, d2: bd };
+  }
+
+  // ─── 위젯 ────────────────────────────────────────────────────────────────
+
+  K.register('kdtree-nn', function (host, opts) {
+    var pts = toPoints(opts.points);
+    var q = isArr(opts.query) && opts.query.length >= 2
+      ? [num(opts.query[0], 7), num(opts.query[1], 7)] : [7, 7];
+
+    var ext;
+    if (isArr(opts.extent) && opts.extent.length >= 4) {
+      ext = [num(opts.extent[0], 0), num(opts.extent[1], 10), num(opts.extent[2], 0), num(opts.extent[3], 10)];
+    } else {
+      var xs = pts.map(function (p) { return p[0]; }).concat([q[0]]);
+      var ys = pts.map(function (p) { return p[1]; }).concat([q[1]]);
+      ext = [Math.min.apply(null, xs) - 1, Math.max.apply(null, xs) + 1,
+             Math.min.apply(null, ys) - 1, Math.max.apply(null, ys) + 1];
+    }
+    if (ext[1] <= ext[0]) ext[1] = ext[0] + 1;
+    if (ext[3] <= ext[2]) ext[3] = ext[2] + 1;
+
+    var showList = isArr(opts.show) ? opts.show.map(String) : ['partition', 'tree', 'radius', 'counters'];
+    var has = function (k) { return showList.indexOf(k) >= 0; };
+    var cntList = isArr(opts.counters) ? opts.counters.map(String) : ['visited', 'pruned', 'bruteforce'];
+    var hasCnt = function (k) { return cntList.indexOf(k) >= 0; };
+    var wantPrune = opts.highlightPrune !== false;
+    var wantBrute = opts.compareBruteforce !== false;
+
+    var order = String(opts.order || 'near-first') === 'far-first' ? 'far-first' : 'near-first';
+
+    var root = build(pts, 0, ext.slice());
+    var nNodes = numberNodes(root);
+    var bf = bruteforce(pts, q);
+
+    var run = null, play = null;
+    function rebuild() { run = search(root, q, order === 'near-first', pts.length); }
+    rebuild();
+
+    var title = 'KD 트리 최근접 탐색 — 원이 분할선에 닿지 않으면 그 너머는 안 본다';
+    var notes = [];
+    if (isArr(opts.points) && opts.points.length > pts.length) {
+      notes.push('점이 많아 앞 ' + pts.length + '개만 그린다 (넘긴 것은 ' + opts.points.length + '개)');
+    }
+    if (opts.dim != null && num(opts.dim, 2) !== 2) {
+      notes.push('이 위젯은 2차원만 그린다 (넘긴 dim=' + opts.dim + ')');
+    }
+    if (notes.length) title += '  ·  ' + notes.join(', ');
+
+    var ui = K.frame(host, { title: title });
+
+    // 순서를 바꿔도 답은 맞는다. 갈리는 것은 가지치기 효율이다 —
+    // 그 사실이 탭 하나로 확인돼야 "정확성이 아니라 속도가 순서에 달렸다"가 전달된다.
+    K.seg(ui.slot, [
+      { label: '가까운 쪽 먼저', value: 'near-first' },
+      { label: '먼 쪽 먼저', value: 'far-first' }
+    ], order, function (v) { order = v; rebuild(); play.goto(0); });
+
+    (function legend() {
+      var T = K.tokens(ui.stage);
+      var items = [['방문', T.wVisited], ['현재 최선', T.wPath], ['잘라 냄', T.fgFaint], ['질의점', T.wGoal]];
+      var el = K.el('div', 'wk-legend');
+      items.forEach(function (it) {
+        var sp = K.el('span'), ic = K.el('i');
+        ic.style.background = it[1];
+        sp.appendChild(ic); sp.appendChild(document.createTextNode(it[0]));
+        el.appendChild(sp);
+      });
+      ui.slot.appendChild(el);
+      K.onThemeChange(function () {
+        var T2 = K.tokens(ui.stage);
+        var cs = [T2.wVisited, T2.wPath, T2.fgFaint, T2.wGoal];
+        Array.prototype.forEach.call(el.querySelectorAll('i'), function (n, k) { n.style.background = cs[k]; });
+      });
+    })();
+
+    // ── 레이아웃 ───────────────────────────────────────────────────────────
+
+    var PAD = 12;
+
+    function treeDepth(t) { return t ? 1 + Math.max(treeDepth(t.left), treeDepth(t.right)) : 0; }
+    var depth = treeDepth(root);
+
+    function layout(w) {
+      var inner = Math.max(200, w - PAD * 2);
+      // 좁으면 평면 위, 트리 아래로 쌓는다. 나란히 두면 둘 다 못 읽는 폭이 된다.
+      var stacked = inner < 620 || !has('tree') || !has('partition');
+      var planeW = stacked ? inner : Math.round(inner * 0.52);
+      var treeW = stacked ? inner : inner - planeW - 16;
+      var planeH = Math.max(180, Math.min(320, planeW));
+      var treeH = Math.max(120, depth * 46 + 20);
+      return {
+        inner: inner, stacked: stacked,
+        planeW: planeW, planeH: planeH,
+        treeW: treeW, treeH: treeH,
+        cntH: has('counters') ? 34 : 0,
+        noteH: 34,
+        height: PAD + (stacked
+          ? (has('partition') ? planeH + 12 : 0) + (has('tree') ? treeH + 12 : 0)
+          : Math.max(has('partition') ? planeH : 0, has('tree') ? treeH : 0) + 12)
+          + (has('counters') ? 34 : 0) + 34 + PAD
+      };
+    }
+
+    // ── 그리기 ─────────────────────────────────────────────────────────────
+
+    function drawPlane(ctx, T, l, st, x0, y0) {
+      var W = l.planeW, H = l.planeH;
+      var sx = function (v) { return x0 + (v - ext[0]) / (ext[1] - ext[0]) * W; };
+      var sy = function (v) { return y0 + H - (v - ext[2]) / (ext[3] - ext[2]) * H; };
+
+      ctx.save();
+      rrect(ctx, x0, y0, W, H, 4);
+      ctx.fillStyle = T.bgElev;
+      ctx.fill();
+      ctx.strokeStyle = T.border;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.save();
+      ctx.beginPath();
+      rrect(ctx, x0, y0, W, H, 4);
+      ctx.clip();
+
+      // 분할선 — 죽은 가지의 선은 흐리게
+      (function lines(t) {
+        if (!t) return;
+        var dead = wantPrune && st.dead.indexOf(t.id) >= 0;
+        ctx.strokeStyle = dead ? T.bgCode : T.border;
+        ctx.lineWidth = dead ? 1 : 1.5;
+        ctx.beginPath();
+        if (t.axis === 0) { ctx.moveTo(sx(t.point[0]), sy(t.box[2])); ctx.lineTo(sx(t.point[0]), sy(t.box[3])); }
+        else { ctx.moveTo(sx(t.box[0]), sy(t.point[1])); ctx.lineTo(sx(t.box[1]), sy(t.point[1])); }
+        ctx.stroke();
+        lines(t.left); lines(t.right);
+      })(root);
+
+      // 현재 최선 거리를 반지름으로 하는 원 — 이 위젯의 본문
+      if (has('radius') && st.best && isFinite(st.bestD2)) {
+        var r = Math.sqrt(st.bestD2) / (ext[1] - ext[0]) * W;
+        ctx.beginPath();
+        ctx.arc(sx(q[0]), sy(q[1]), r, 0, Math.PI * 2);
+        ctx.strokeStyle = T.wPath;
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([4, 3]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.globalAlpha = 0.10;
+        ctx.fillStyle = T.wPath;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+
+      // 판정 중인 분할선을 굵게
+      if ((st.kind === 'prune' || st.kind === 'cross') && st.planeAt != null) {
+        ctx.strokeStyle = st.kind === 'prune' ? T.boxDanger : T.accent;
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        if (st.axis === 0) { ctx.moveTo(sx(st.planeAt), y0); ctx.lineTo(sx(st.planeAt), y0 + H); }
+        else { ctx.moveTo(x0, sy(st.planeAt)); ctx.lineTo(x0 + W, sy(st.planeAt)); }
+        ctx.stroke();
+      }
+      ctx.restore();
+
+      // 점
+      (function dots(t) {
+        if (!t) return;
+        var dead = wantPrune && st.dead.indexOf(t.id) >= 0;
+        var isCur = st.nodeId === t.id;
+        var isBest = st.best && t.point[0] === st.best[0] && t.point[1] === st.best[1];
+        var col = dead ? T.fgFaint : (isBest ? T.wPath : (isCur ? T.accent : T.wVisited));
+        ctx.beginPath();
+        ctx.arc(sx(t.point[0]), sy(t.point[1]), isCur || isBest ? 5.5 : 4, 0, Math.PI * 2);
+        ctx.fillStyle = col;
+        ctx.globalAlpha = dead ? 0.4 : 1;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        dots(t.left); dots(t.right);
+      })(root);
+
+      // 질의점 — 십자로 그려 점과 구분한다(색만으로 나르지 않는다)
+      ctx.strokeStyle = T.wGoal;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(sx(q[0]) - 6, sy(q[1])); ctx.lineTo(sx(q[0]) + 6, sy(q[1]));
+      ctx.moveTo(sx(q[0]), sy(q[1]) - 6); ctx.lineTo(sx(q[0]), sy(q[1]) + 6);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawTree(ctx, T, l, st, x0, y0) {
+      var W = l.treeW;
+      var levelH = Math.min(46, (l.treeH - 20) / Math.max(1, depth - 1) || 46);
+
+      // 각 노드의 x 는 중위 순회 순번으로 정한다 — 가로로 고르게 퍼진다.
+      var order = [], idx = 0;
+      (function inorder(t) {
+        if (!t) return;
+        inorder(t.left);
+        order.push(t); t._ix = idx++;
+        inorder(t.right);
+      })(root);
+      var n = Math.max(1, order.length);
+
+      function px(t) { return x0 + 14 + (t._ix + 0.5) / n * (W - 28); }
+      function py(t) { return y0 + 14 + t.depth * levelH; }
+
+      ctx.save();
+      (function edges(t) {
+        if (!t) return;
+        [t.left, t.right].forEach(function (c) {
+          if (!c) return;
+          var dead = wantPrune && st.dead.indexOf(c.id) >= 0;
+          ctx.strokeStyle = dead ? T.bgCode : T.border;
+          ctx.lineWidth = dead ? 1 : 1.5;
+          ctx.beginPath();
+          ctx.moveTo(px(t), py(t)); ctx.lineTo(px(c), py(c));
+          ctx.stroke();
+          edges(c);
+        });
+      })(root);
+
+      order.forEach(function (t) {
+        var dead = wantPrune && st.dead.indexOf(t.id) >= 0;
+        var isCur = st.nodeId === t.id;
+        var isBest = st.best && t.point[0] === st.best[0] && t.point[1] === st.best[1];
+        var col = dead ? T.bgElev : (isBest ? T.wPath : (isCur ? T.accent : T.wVisited));
+        ctx.beginPath();
+        ctx.arc(px(t), py(t), isCur ? 9 : 7, 0, Math.PI * 2);
+        ctx.globalAlpha = dead ? 0.45 : 1;
+        ctx.fillStyle = col;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = dead ? T.border : (isCur ? T.accent : T.border);
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        // 축을 글자로도 적는다 — 색만으로는 x 분할인지 y 분할인지 알 수 없다
+        ctx.fillStyle = dead ? T.fgFaint : T.bg;
+        ctx.font = '600 9px ' + MONO;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(t.axis === 0 ? 'x' : 'y', px(t), py(t));
+      });
+      ctx.restore();
+    }
+
+    function drawCounters(ctx, T, l, st, y) {
+      var items = [];
+      if (hasCnt('visited')) items.push(['방문', st.visited, T.fg]);
+      if (hasCnt('bruteforce')) items.push(['전수 비교', pts.length, T.fgDim]);
+      if (hasCnt('pruned')) items.push(['건너뜀', st.pruned, st.pruned > 0 ? T.wPath : T.fgFaint]);
+      ctx.save();
+      var x = PAD;
+      items.forEach(function (it) {
+        ctx.font = '11px ' + FONT;
+        ctx.fillStyle = T.fgFaint;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(it[0], x, y + 10);
+        var lw = ctx.measureText(it[0]).width;
+        ctx.font = '600 14px ' + MONO;
+        ctx.fillStyle = it[2];
+        ctx.fillText(String(it[1]), x + lw + 6, y + 10);
+        x += lw + 6 + ctx.measureText(String(it[1])).width + 20;
+      });
+      ctx.restore();
+      return y + 34;
+    }
+
+    function draw(ctx, size, T) {
+      var l = layout(size.w);
+      var i = play ? play.index() : 0;
+      var st = run.steps[Math.min(i, run.steps.length - 1)];
+      var y = PAD;
+
+      if (l.stacked) {
+        if (has('partition')) { drawPlane(ctx, T, l, st, PAD, y); y += l.planeH + 12; }
+        if (has('tree')) { drawTree(ctx, T, l, st, PAD, y); y += l.treeH + 12; }
+      } else {
+        if (has('partition')) drawPlane(ctx, T, l, st, PAD, y);
+        if (has('tree')) drawTree(ctx, T, l, st, PAD + l.planeW + 16, y);
+        y += Math.max(l.planeH, l.treeH) + 12;
+      }
+
+      if (has('counters')) y = drawCounters(ctx, T, l, st, y);
+
+      ctx.save();
+      ctx.font = '600 12px ' + FONT;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      if (st.kind === 'done') {
+        // 동점일 때 좌표가 다를 수 있다 — 거리로 대조해야 한다. 좌표로 비교하면
+      // 같은 거리의 다른 점을 골랐을 때 맞는 답을 틀렸다고 보고하게 된다.
+      var agree = wantBrute && Math.abs(run.bestD2 - bf.d2) < 1e-9;
+        ctx.fillStyle = agree || !wantBrute ? T.wPath : T.boxDanger;
+        ctx.fillText('최근접 (' + run.best[0] + ', ' + run.best[1] + ')' +
+          (wantBrute ? (agree ? '  ·  전수 비교와 일치' : '  ·  전수 비교와 불일치') : '') +
+          '  ·  방문 ' + run.visited + ' / ' + pts.length, PAD, y);
+      } else if (st.kind === 'prune') {
+        ctx.fillStyle = T.wPath;
+        ctx.fillText('가지치기 — 원이 선에 닿지 않는다', PAD, y);
+      } else if (st.kind === 'cross') {
+        ctx.fillStyle = T.accent;
+        ctx.fillText('원이 선을 넘었다 — 반대쪽도 봐야 한다', PAD, y);
+      } else {
+        ctx.fillStyle = T.fgDim;
+        ctx.fillText(order === 'near-first'
+          ? '질의점 쪽으로 먼저 내려간다 — 좋은 후보를 빨리 잡아야 원이 작아진다'
+          : '먼 쪽으로 먼저 내려간다 — 답은 같지만 원이 늦게 줄어 가지치기가 덜 먹힌다', PAD, y);
+      }
+      ctx.restore();
+    }
+
+    var cv = K.canvas(ui.stage, {
+      height: function (w) { return layout(w).height; },
+      draw: draw
+    });
+
+    play = K.player(ui, {
+      total: function () { return run.steps.length; },
+      render: function () { cv.redraw(); },
+      label: function (i) { return run.steps[Math.min(i, run.steps.length - 1)].note; }
+    });
+    play.draw();
+
+    host.__widget = {
+      result: function () {
+        return { best: run.best.slice(), dist: Math.sqrt(run.bestD2),
+                 visited: run.visited, pruned: run.pruned, total: pts.length };
+      },
+      bruteforce: function () { return { best: bf.best.slice(), dist: Math.sqrt(bf.d2) }; },
+      agrees: function () { return Math.abs(run.bestD2 - bf.d2) < 1e-9; },
+      order: function () { return order; },
+      setOrder: function (v) {
+        order = (v === 'far-first') ? 'far-first' : 'near-first';
+        rebuild(); play.goto(0);
+      },
+      nodes: function () { return nNodes; },
+      steps: function () { return run.steps.length; },
+      goto: function (i) { play.goto(i); }
+    };
+  });
+})();
+
 /* ==== multi-agv-conflict.js ==== */
 /* multi-agv-conflict.js — 여러 대가 같은 통로를 쓸 때 무엇이 무너지는가
  *
@@ -10272,6 +10818,638 @@ window.Widgets = window.Widgets || {};
     };
 
     player.goto(0);
+  });
+})();
+
+/* ==== ringbuffer-concurrency.js ==== */
+/* ringbuffer-concurrency.js — 오버런이 일어나는 그 한 스텝
+ *
+ * 이 위젯이 가르치려는 단 하나:
+ *   **링 버퍼가 터지는 것은 버퍼가 작아서가 아니라 생산과 소비의 속도가 다르기
+ *   때문이고, 그 차이는 버퍼 크기를 키워도 사라지지 않는다.**
+ *   생산이 소비보다 빠르면 점유는 단조 증가하고, 용량이 얼마든 언젠가 찬다.
+ *   버퍼는 **순간적인 요동을 흡수할 뿐 평균 속도 차이를 흡수하지 못한다.**
+ *
+ * 그래서 이 위젯의 중심은 링 그림이 아니라 **점유 막대와 유실 카운터**다.
+ *   칸이 색칠되는 애니메이션은 예쁘지만, 독자가 실제로 놓치는 것은 거기가 아니다.
+ *   "버퍼를 8에서 64로 키우면 되지 않나"에 답하지 못하면 이 자료구조는
+ *   외운 관용구로 남는다. 용량을 바꿔 보면 유실이 **늦게 시작될 뿐 멈추지 않는다**.
+ *   그 사실이 카운터에 숫자로 찍혀야 한다.
+ *
+ * 왜 정수비로 인터리빙을 고정하는가
+ *   진짜 스레드로 돌리면 실행마다 결과가 달라 되감기가 불가능하다(런타임 주석 참조).
+ *   생산 p회마다 소비 c회라는 **결정적 일정**으로 바꾸면 같은 스텝에서 같은 그림이
+ *   나오고, 그러면서도 "속도가 다르면 무슨 일이 나는가"라는 논지는 그대로 남는다.
+ *   실제 스레드의 무작위성은 본문의 실측이 담당하고, 위젯은 인과를 담당한다.
+ *
+ * 왜 정책을 셋 두는가
+ *   가득 찼을 때 무엇을 할지가 곧 시스템의 성격이다. 덮어쓰면 오래된 것이 죽고
+ *   (오디오·센서), 버리면 새것이 죽고(로그), 막으면 생산자가 느려진다(배압).
+ *   같은 화면에서 셋을 갈아 끼워야 "정책은 고르는 것이지 옳은 것이 있는 게 아니다"가 전달된다.
+ *
+ * ── opts (챕터가 넘기는 것. 이 주석이 명세다) ────────────────────────────────
+ *   capacity   : 정수 4~16 (기본 8). 링의 칸 수
+ *   produce    : 정수 1~6 (기본 3). 한 주기에 생산하는 횟수
+ *   consume    : 정수 1~6 (기본 1). 한 주기에 소비하는 횟수
+ *   steps      : 정수 (기본 36, 상한 200). 전체 연산 수
+ *   policy     : "overwrite" | "drop" | "block" (기본 "overwrite")
+ *   modes      : 위 정책 중 탭으로 보여 줄 것들. 생략하면 셋 다
+ *   show       : { occupancy, counters, timeline, ambiguity }  전부 기본 true
+ *                ambiguity=true 면 head==tail 이 가득/빈 양쪽에서 일어나는 순간을 표시한다
+ *   controls   : { step, rewind, editCapacity, editRates }  전부 기본 true
+ *
+ * 넘긴 값이 무엇이든 던지지 않는다(계약 §1). 범위를 벗어나면 잘라서 쓰고,
+ * 자른 사실은 제목에 적는다 — 조용히 자르면 독자는 화면이 자기가 넘긴 것이라 믿는다.
+ */
+(function () {
+  'use strict';
+
+  var K = window.WidgetKit;
+  if (!K) return;
+
+  var MAX_STEPS = 200;   // 계약 §7
+  var CAP_MIN = 4, CAP_MAX = 16;
+  var RATE_MIN = 1, RATE_MAX = 6;
+
+  var FONT = '-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif';
+  var MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace';
+
+  var POLICIES = {
+    overwrite: {
+      label: '덮어쓰기',
+      short: '가득 차면 가장 오래된 것을 덮는다',
+      note: '오래된 것이 죽는다. 최신값만 의미 있는 곳 — 오디오 출력, 센서 최신 자세.',
+      lostWord: '덮임'
+    },
+    drop: {
+      label: '버리기',
+      short: '가득 차면 새 데이터를 버린다',
+      note: '새것이 죽는다. 이미 받은 것을 지키는 편이 나은 곳 — 로그 수집, 계측.',
+      lostWord: '버림'
+    },
+    block: {
+      label: '막기(배압)',
+      short: '가득 차면 생산자가 기다린다',
+      note: '아무것도 안 죽지만 생산자가 느려진다. 그 느려짐이 상류로 전파되는 것이 배압이다.',
+      lostWord: '대기'
+    }
+  };
+
+  var POLICY_ALIAS = {
+    overwrite: 'overwrite', overwrote: 'overwrite', 덮어쓰기: 'overwrite', latest: 'overwrite',
+    drop: 'drop', discard: 'drop', 버리기: 'drop', reject: 'drop',
+    block: 'block', backpressure: 'block', 막기: 'block', wait: 'block'
+  };
+
+  function isArr(v) {
+    return !!v && typeof v === 'object' && typeof v.length === 'number' && typeof v !== 'string';
+  }
+
+  function clampInt(v, lo, hi, dflt) {
+    var n = (typeof v === 'number') ? v : parseInt(v, 10);
+    if (!isFinite(n)) return dflt;
+    n = Math.round(n);
+    return n < lo ? lo : (n > hi ? hi : n);
+  }
+
+  function truthy(v, dflt) { return v === undefined || v === null ? dflt : !!v; }
+
+  function rrect(ctx, x, y, w, h, r) {
+    r = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  function wrap(ctx, text, maxW) {
+    var words = String(text).split(' ');
+    var lines = [], cur = '';
+    for (var i = 0; i < words.length; i++) {
+      var t = cur ? cur + ' ' + words[i] : words[i];
+      if (ctx.measureText(t).width > maxW && cur) { lines.push(cur); cur = words[i]; }
+      else cur = t;
+    }
+    if (cur) lines.push(cur);
+    return lines;
+  }
+
+  // ─── 계산 ────────────────────────────────────────────────────────────────
+  //
+  // 상태를 전부 미리 만든다. 되감기가 결정적이어야 하므로 그리는 쪽에서
+  // 계산하는 일이 없어야 한다.
+
+  /* 생산 p회 · 소비 c회를 번갈아 내는 결정적 일정.
+   * 진짜 스레드의 무작위 인터리빙은 본문 실측의 몫이고, 여기서는 인과만 남긴다. */
+  function schedule(p, c, n) {
+    var out = [];
+    while (out.length < n) {
+      for (var a = 0; a < p && out.length < n; a++) out.push('P');
+      for (var b = 0; b < c && out.length < n; b++) out.push('C');
+    }
+    return out;
+  }
+
+  function simulate(cap, p, c, n, policy) {
+    var ops = schedule(p, c, n);
+    var slots = new Array(cap);          // null = 쓰인 적 없음
+    var head = 0, tail = 0, occ = 0;
+    var produced = 0, consumed = 0, lost = 0, starved = 0, blocked = 0;
+    var seq = 0;
+
+    var states = [{
+      slots: slots.slice(), head: head, tail: tail, occ: occ,
+      produced: 0, consumed: 0, lost: 0, starved: 0, blocked: 0,
+      op: null, note: '초기 상태. 비었고 head 와 tail 이 같다.',
+      hit: null, kind: 'init', rows: 0
+    }];
+    var rows = [];
+
+    for (var i = 0; i < ops.length; i++) {
+      var op = ops[i];
+      var kind, note, hit = null;
+
+      if (op === 'P') {
+        if (occ === cap) {
+          if (policy === 'overwrite') {
+            // 가장 오래된 미읽음이 덮인다. tail 이 밀려나는 것이 곧 유실이다.
+            seq += 1;
+            hit = head;
+            slots[head] = seq;
+            head = (head + 1) % cap;
+            tail = (tail + 1) % cap;
+            produced += 1; lost += 1;
+            kind = 'overrun';
+            note = '가득 찬 상태에서 생산 — 가장 오래된 미읽음이 덮였다. 유실 ' + lost + '.';
+          } else if (policy === 'drop') {
+            produced += 1; lost += 1;
+            kind = 'overrun';
+            note = '가득 차서 새 데이터를 버렸다. 유실 ' + lost + '.';
+          } else {
+            blocked += 1;
+            kind = 'blocked';
+            note = '가득 차서 생산자가 기다린다. 대기 ' + blocked + '회 — 이 지연이 상류로 전파된다.';
+          }
+        } else {
+          seq += 1;
+          hit = head;
+          slots[head] = seq;
+          head = (head + 1) % cap;
+          occ += 1; produced += 1;
+          kind = 'produce';
+          note = '슬롯 ' + hit + ' 에 ' + seq + ' 을 썼다. 점유 ' + occ + '/' + cap + '.';
+        }
+      } else {
+        if (occ === 0) {
+          starved += 1;
+          kind = 'underrun';
+          note = '빈 버퍼에서 소비 — 읽을 것이 없다. 굶음 ' + starved + '회.';
+        } else {
+          hit = tail;
+          var got = slots[tail];
+          slots[tail] = null;
+          tail = (tail + 1) % cap;
+          occ -= 1; consumed += 1;
+          kind = 'consume';
+          note = '슬롯 ' + hit + ' 에서 ' + got + ' 을 읽었다. 점유 ' + occ + '/' + cap + '.';
+        }
+      }
+
+      rows.push({
+        step: rows.length + 1, op: op === 'P' ? '생산' : '소비',
+        head: head, tail: tail, occ: occ, kind: kind
+      });
+
+      states.push({
+        slots: slots.slice(), head: head, tail: tail, occ: occ,
+        produced: produced, consumed: consumed, lost: lost,
+        starved: starved, blocked: blocked,
+        op: op, note: note, hit: hit, kind: kind, rows: rows.length
+      });
+    }
+
+    return {
+      states: states, rows: rows, cap: cap,
+      produced: produced, consumed: consumed, lost: lost,
+      starved: starved, blocked: blocked, policy: policy
+    };
+  }
+
+  // ─── 위젯 ────────────────────────────────────────────────────────────────
+
+  K.register('ringbuffer-concurrency', function (host, opts) {
+    var rawCap = opts.capacity, rawP = opts.produce, rawC = opts.consume;
+    var cap = clampInt(rawCap, CAP_MIN, CAP_MAX, 8);
+    var pRate = clampInt(rawP, RATE_MIN, RATE_MAX, 3);
+    var cRate = clampInt(rawC, RATE_MIN, RATE_MAX, 1);
+    var steps = clampInt(opts.steps, 4, MAX_STEPS, 36);
+
+    var show = opts.show || {};
+    var controls = opts.controls || {};
+    var wantOcc = truthy(show.occupancy, true);
+    var wantCounters = truthy(show.counters, true);
+    var wantTimeline = truthy(show.timeline, true);
+    var wantAmbiguity = truthy(show.ambiguity, true);
+
+    var policy = POLICY_ALIAS[String(opts.policy || 'overwrite').toLowerCase()] || 'overwrite';
+    var modes = [];
+    if (isArr(opts.modes)) {
+      for (var i = 0; i < opts.modes.length; i++) {
+        var m = POLICY_ALIAS[String(opts.modes[i]).toLowerCase()];
+        if (m && modes.indexOf(m) < 0) modes.push(m);
+      }
+    }
+    if (!modes.length) modes = ['overwrite', 'drop', 'block'];
+    if (modes.indexOf(policy) < 0) policy = modes[0];
+
+    var run = null, play = null;
+    function rebuild() { run = simulate(cap, pRate, cRate, steps, policy); }
+    rebuild();
+
+    var title = '링 버퍼 — 생산 ' + pRate + ' : 소비 ' + cRate + ' 일 때 무엇이 일어나는가';
+    // 잘라 놓고 말하지 않으면 위젯이 거짓말을 한다.
+    var clampNote = [];
+    if (rawCap != null && clampInt(rawCap, -1e9, 1e9, cap) !== cap) clampNote.push('용량 ' + rawCap + '→' + cap);
+    if (rawP != null && clampInt(rawP, -1e9, 1e9, pRate) !== pRate) clampNote.push('생산 ' + rawP + '→' + pRate);
+    if (rawC != null && clampInt(rawC, -1e9, 1e9, cRate) !== cRate) clampNote.push('소비 ' + rawC + '→' + cRate);
+    if (clampNote.length) title += '  ·  범위 밖이라 조정: ' + clampNote.join(', ');
+
+    var ui = K.frame(host, { title: title });
+
+    var modeSeg = null;
+    if (modes.length > 1) {
+      modeSeg = K.seg(ui.slot, modes.map(function (id) {
+        return { label: POLICIES[id].label, value: id };
+      }), policy, function (v) { policy = v; rebuild(); play.goto(0); });
+    }
+
+    function numField(label, get, set, lo, hi) {
+      var w = K.el('label', 'wk-field');
+      w.appendChild(K.el('span', null, label));
+      var inp = K.el('input', 'wk-num');
+      inp.type = 'number';
+      inp.min = String(lo); inp.max = String(hi);
+      inp.value = String(get());
+      inp.setAttribute('aria-label', label);
+      inp.addEventListener('change', function () {
+        set(clampInt(inp.value, lo, hi, get()));
+        inp.value = String(get());
+        rebuild();
+        play.goto(0);
+      });
+      w.appendChild(inp);
+      ui.slot.appendChild(w);
+    }
+
+    // 용량을 키워도 유실이 멈추지 않는 것을 독자가 직접 확인해야 한다.
+    // 이 위젯의 논지가 그 조작에 걸려 있으므로 편집을 기본으로 켠다.
+    if (truthy(controls.editCapacity, true)) {
+      numField('용량', function () { return cap; }, function (v) { cap = v; }, CAP_MIN, CAP_MAX);
+    }
+    if (truthy(controls.editRates, true)) {
+      numField('생산', function () { return pRate; }, function (v) { pRate = v; }, RATE_MIN, RATE_MAX);
+      numField('소비', function () { return cRate; }, function (v) { cRate = v; }, RATE_MIN, RATE_MAX);
+    }
+
+    (function legend() {
+      var T = K.tokens(ui.stage);
+      var items = [['미읽음', T.wFrontier], ['방금 쓴 칸', T.accent], ['유실·굶음', T.boxDanger], ['빈 칸', T.bgElev]];
+      var wrapEl = K.el('div', 'wk-legend');
+      items.forEach(function (it) {
+        var sp = K.el('span'); var ic = K.el('i');
+        ic.style.background = it[1];
+        sp.appendChild(ic); sp.appendChild(document.createTextNode(it[0]));
+        wrapEl.appendChild(sp);
+      });
+      ui.slot.appendChild(wrapEl);
+      K.onThemeChange(function () {
+        var T2 = K.tokens(ui.stage);
+        var cs = [T2.wFrontier, T2.accent, T2.boxDanger, T2.bgElev];
+        Array.prototype.forEach.call(wrapEl.querySelectorAll('i'), function (n, k) { n.style.background = cs[k]; });
+      });
+    })();
+
+    // ── 레이아웃 ───────────────────────────────────────────────────────────
+
+    var PAD = 12, ROW_H = 21, TABLE_MAX = 560;
+
+    var measCv = null;
+    function measHead(inner) {
+      if (!measCv) measCv = document.createElement('canvas').getContext('2d');
+      measCv.font = '12px ' + FONT;
+      var P = POLICIES[policy];
+      var h = wrap(measCv, '정책: ' + P.short + ' — ' + P.note, inner).length * 15;
+      h += wrap(measCv, verdict(), inner).length * 15;
+      return h + 10;
+    }
+
+    function layout(w) {
+      var inner = Math.max(200, w - PAD * 2);
+      var cw = Math.max(22, Math.min(46, Math.floor(inner / cap)));
+      var rowsN = Math.min(run.rows.length, 12);   // 표는 최근 12줄만. 그 이상은 스크롤 없는 캔버스에서 안 읽힌다
+      return {
+        w: w, inner: inner, cw: cw, x0: PAD,
+        tableW: Math.max(280, Math.min(TABLE_MAX, inner)),
+        headH: measHead(inner),
+        ringH: 16 + cw + 30 + (wantAmbiguity ? 17 : 0),
+        occH: wantOcc ? 40 : 0,
+        cntH: wantCounters ? 34 : 0,
+        tableH: wantTimeline ? (rowsN + 1) * ROW_H + 22 : 0,
+        rowsN: rowsN,
+        height: 0
+      };
+    }
+    function height(w) {
+      var l = layout(w);
+      return PAD + l.headH + l.ringH + l.occH + l.cntH + l.tableH + PAD;
+    }
+
+    function verdict() {
+      var r = run;
+      if (pRate > cRate) {
+        return '생산이 소비보다 빠르다 — 점유는 단조 증가하고, 용량이 얼마든 언젠가 찬다. ' +
+               '버퍼는 순간적인 요동을 흡수할 뿐 평균 속도 차이를 흡수하지 못한다.';
+      }
+      if (pRate < cRate) {
+        return '소비가 생산보다 빠르다 — 버퍼는 자주 비고 소비자가 굶는다. 유실은 없지만 소비자가 놀고 있다.';
+      }
+      return '속도가 같다 — 점유가 안정된다. 실제 시스템에서 이 균형은 오래가지 않는다.';
+    }
+
+    // ── 그리기 ─────────────────────────────────────────────────────────────
+
+    function drawRing(ctx, T, l, st, y) {
+      ctx.save();
+      ctx.font = '10px ' + MONO;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      ctx.fillStyle = T.fgFaint;
+      for (var i = 0; i < cap; i++) ctx.fillText(String(i), l.x0 + i * l.cw + l.cw / 2, y);
+      ctx.restore();
+      y += 16;
+
+      for (var j = 0; j < cap; j++) {
+        // 미읽음 구간은 tail 에서 head 로 링을 돌며 occ 칸이다.
+        var unread = false;
+        if (st.occ > 0) {
+          var d = (j - st.tail + cap) % cap;
+          unread = d < st.occ;
+        }
+        var isHit = st.hit === j;
+        var bad = isHit && (st.kind === 'overrun' || st.kind === 'underrun');
+
+        var fill = T.bgElev, txt = T.fgFaint, alpha = 1, thick = false, stroke = T.border;
+        if (unread) { fill = T.wFrontier; txt = T.fg; alpha = 0.32; }
+        if (isHit && st.kind === 'produce') { fill = T.accent; txt = T.bg; alpha = 1; thick = true; stroke = T.accent; }
+        if (isHit && st.kind === 'consume') { fill = T.wPath; txt = T.bg; alpha = 1; thick = true; stroke = T.wPath; }
+        if (bad) { fill = T.boxDanger; txt = T.fg; alpha = 1; thick = true; stroke = T.boxDanger; }
+
+        var x = l.x0 + j * l.cw;
+        ctx.save();
+        rrect(ctx, x + 1, y + 1, l.cw - 2, l.cw - 2, 4);
+        ctx.globalAlpha = alpha;
+        ctx.fillStyle = fill;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        ctx.lineWidth = thick ? 2 : 1;
+        ctx.strokeStyle = stroke;
+        ctx.stroke();
+        var v = st.slots[j];
+        ctx.fillStyle = txt;
+        ctx.font = (thick ? '600 ' : '') + Math.max(10, Math.floor(l.cw * 0.34)) + 'px ' + MONO;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(v == null ? '·' : String(v), x + l.cw / 2, y + l.cw / 2);
+        ctx.restore();
+      }
+      y += l.cw;
+
+      // head·tail 표식. **둘이 겹치는 순간이 이 자료구조의 함정이고, 그 순간이
+      // 정확히 두 이름이 화면에서 겹치는 순간이다.** 가로로 비켜 놓는 것으로는
+      // 부족해서(이름이 길다) 항상 두 줄로 나눠 찍는다. 겹칠 때만 두 줄로 바꾸면
+      // 그 스텝에서 캔버스 높이가 변해 재생 중에 화면이 튄다.
+      var same = st.head === st.tail;
+      ctx.save();
+      ctx.font = '600 10px ' + MONO;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      [[st.head, 'head(w)', T.wStart, 0], [st.tail, 'tail(r)', T.wGoal, 13]].forEach(function (mk) {
+        var mx = l.x0 + mk[0] * l.cw + l.cw / 2;
+        ctx.fillStyle = mk[2];
+        ctx.beginPath();
+        ctx.moveTo(mx, y + 1 + mk[3]); ctx.lineTo(mx - 4, y + 6 + mk[3]); ctx.lineTo(mx + 4, y + 6 + mk[3]);
+        ctx.closePath(); ctx.fill();
+        ctx.fillText(mk[1], mx, y + 7 + mk[3]);
+      });
+      ctx.restore();
+      y += 30;
+
+      if (wantAmbiguity) {
+        // 자리를 늘 비워 둔다. 겹치는 스텝에서만 줄을 넣으면 높이가 변해 화면이 튄다.
+        ctx.save();
+        ctx.font = '600 11px ' + FONT;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        if (same) {
+          ctx.fillStyle = T.boxDanger;
+          ctx.fillText('head == tail — ' + (st.occ === 0 ? '비었다' : '가득 찼다') +
+                       '. 두 상태가 같은 모양이라 이 둘만으로는 구분할 수 없다.', l.x0, y);
+        }
+        ctx.restore();
+        y += 17;
+      }
+      return y;
+    }
+
+    function drawOccupancy(ctx, T, l, st, y) {
+      var barW = Math.min(l.inner, 320);
+      var h = 12;
+      ctx.save();
+      rrect(ctx, l.x0, y, barW, h, 3);
+      ctx.fillStyle = T.bgElev;
+      ctx.fill();
+      var frac = cap ? st.occ / cap : 0;
+      if (frac > 0) {
+        rrect(ctx, l.x0, y, Math.max(3, barW * frac), h, 3);
+        ctx.fillStyle = st.occ === cap ? T.boxDanger : T.wFrontier;
+        ctx.fill();
+      }
+      ctx.strokeStyle = T.border;
+      ctx.lineWidth = 1;
+      rrect(ctx, l.x0, y, barW, h, 3);
+      ctx.stroke();
+      ctx.fillStyle = T.fgDim;
+      ctx.font = '11px ' + MONO;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('점유 ' + st.occ + ' / ' + cap, l.x0 + barW + 10, y + h / 2);
+      ctx.restore();
+      return y + 40;
+    }
+
+    function drawCounters(ctx, T, l, st, y) {
+      var P = POLICIES[policy];
+      var badN = policy === 'block' ? st.blocked : st.lost;
+      var items = [
+        ['생산', st.produced, T.fg],
+        ['소비', st.consumed, T.fg],
+        [P.lostWord, badN, badN > 0 ? T.boxDanger : T.fgFaint],
+        ['굶음', st.starved, st.starved > 0 ? T.boxDanger : T.fgFaint]
+      ];
+      ctx.save();
+      ctx.textBaseline = 'middle';
+      var x = l.x0;
+      for (var i = 0; i < items.length; i++) {
+        ctx.font = '11px ' + FONT;
+        ctx.fillStyle = T.fgFaint;
+        ctx.textAlign = 'left';
+        ctx.fillText(items[i][0], x, y + 8);
+        var lw = ctx.measureText(items[i][0]).width;
+        ctx.font = '600 14px ' + MONO;
+        ctx.fillStyle = items[i][2];
+        ctx.fillText(String(items[i][1]), x + lw + 6, y + 8);
+        x += lw + 6 + ctx.measureText(String(items[i][1])).width + 22;
+      }
+      ctx.restore();
+      return y + 34;
+    }
+
+    function drawTimeline(ctx, T, l, st, y) {
+      var cols = ['step', '동작', 'head', 'tail', '점유', '결과'];
+      var avail = l.tableW;
+      var wgt = [0.8, 1, 0.9, 0.9, 0.9, 1.6];
+      var tot = wgt.reduce(function (a, b) { return a + b; }, 0);
+      var cw = wgt.map(function (v) { return v / tot * avail; });
+
+      ctx.save();
+      ctx.textBaseline = 'middle';
+      ctx.font = '600 11px ' + MONO;
+      ctx.fillStyle = T.fgDim;
+      var x = l.x0;
+      for (var h = 0; h < cols.length; h++) {
+        ctx.textAlign = h === 0 ? 'left' : 'center';
+        ctx.fillText(cols[h], h === 0 ? x + 2 : x + cw[h] / 2, y + ROW_H / 2);
+        x += cw[h];
+      }
+      ctx.strokeStyle = T.border;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(l.x0, y + ROW_H - 1);
+      ctx.lineTo(l.x0 + avail, y + ROW_H - 1);
+      ctx.stroke();
+      y += ROW_H;
+
+      // 최근 것만 보인다. 지나간 스텝을 다 쌓으면 캔버스가 끝없이 길어진다.
+      var end = st.rows;
+      var start = Math.max(0, end - l.rowsN);
+      for (var k = start; k < start + l.rowsN; k++) {
+        var row = run.rows[k];
+        var on = k < end;
+        var isCur = k === end - 1;
+        if (isCur && on) {
+          ctx.fillStyle = T.bgElev;
+          rrect(ctx, l.x0 - 2, y + 1, avail + 4, ROW_H - 2, 3);
+          ctx.fill();
+          ctx.fillStyle = T.accent;
+          ctx.fillRect(l.x0 - 2, y + 2, 2, ROW_H - 4);
+        }
+        x = l.x0;
+        var vals = on
+          ? [row.step, row.op, row.head, row.tail, row.occ,
+             row.kind === 'overrun' ? POLICIES[policy].lostWord
+               : row.kind === 'underrun' ? '굶음'
+               : row.kind === 'blocked' ? '대기' : 'OK']
+          : ['·', '·', '·', '·', '·', '·'];
+        for (var q = 0; q < cols.length; q++) {
+          var danger = on && q === 5 && vals[5] !== 'OK';
+          ctx.fillStyle = !on ? T.fgFaint : (danger ? T.boxDanger : (q === 4 ? T.accent : T.fg));
+          ctx.font = (danger ? '600 ' : '') + '11px ' + MONO;
+          ctx.textAlign = q === 0 ? 'left' : 'center';
+          ctx.fillText(String(vals[q]), q === 0 ? x + 2 : x + cw[q] / 2, y + ROW_H / 2);
+          x += cw[q];
+        }
+        y += ROW_H;
+      }
+      ctx.restore();
+      return y + 22;
+    }
+
+    function draw(ctx, size, T) {
+      var l = layout(size.w);
+      var i = play ? play.index() : 0;
+      var st = run.states[Math.min(i, run.states.length - 1)];
+      var y = PAD;
+
+      ctx.save();
+      ctx.font = '12px ' + FONT;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      var P = POLICIES[policy];
+      var head = wrap(ctx, '정책: ' + P.short + ' — ' + P.note, l.inner);
+      head.forEach(function (t, k) { ctx.fillStyle = T.fg; ctx.fillText(t, l.x0, y + k * 15); });
+      y += head.length * 15;
+      var vd = wrap(ctx, verdict(), l.inner);
+      vd.forEach(function (t, k) {
+        ctx.fillStyle = pRate > cRate ? T.boxDanger : T.fgDim;
+        ctx.fillText(t, l.x0, y + k * 15);
+      });
+      y += vd.length * 15 + 10;
+      ctx.restore();
+
+      y = drawRing(ctx, T, l, st, y);
+      if (wantOcc) y = drawOccupancy(ctx, T, l, st, y);
+      if (wantCounters) y = drawCounters(ctx, T, l, st, y);
+      if (wantTimeline) y = drawTimeline(ctx, T, l, st, y);
+    }
+
+    var cv = K.canvas(ui.stage, { height: height, draw: draw });
+
+    function label(i) {
+      var st = run.states[Math.min(i, run.states.length - 1)];
+      var s = st.note;
+      if (i >= run.states.length - 1) {
+        var badN = policy === 'block' ? run.blocked : run.lost;
+        s += '  끝. 생산 ' + run.produced + ', 소비 ' + run.consumed + ', ' +
+             POLICIES[policy].lostWord + ' ' + badN + ', 굶음 ' + run.starved + '.';
+        if (badN > 0) s += ' 용량을 키워 보라 — 유실이 늦게 시작될 뿐 멈추지 않는다.';
+      }
+      return s;
+    }
+
+    play = K.player(ui, {
+      total: function () { return run.states.length; },
+      render: function () { cv.redraw(); },
+      label: label
+    });
+    play.draw();
+
+    // 본문의 표·수치와 위젯이 어긋나면 여기서 잡는다.
+    host.__widget = {
+      config: function () { return { cap: cap, produce: pRate, consume: cRate, policy: policy, steps: steps }; },
+      totals: function () {
+        return { produced: run.produced, consumed: run.consumed, lost: run.lost,
+                 starved: run.starved, blocked: run.blocked };
+      },
+      rows: function () { return run.rows.slice(); },
+      steps: function () { return run.states.length; },
+      setPolicy: function (v) {
+        var id = POLICY_ALIAS[String(v).toLowerCase()];
+        if (!id) return;
+        policy = id;
+        if (modeSeg) {
+          Array.prototype.forEach.call(modeSeg.children, function (c) {
+            c.classList.toggle('is-active', c.getAttribute('data-val') === id);
+          });
+        }
+        rebuild(); play.goto(0);
+      },
+      setCapacity: function (v) { cap = clampInt(v, CAP_MIN, CAP_MAX, cap); rebuild(); play.goto(0); },
+      goto: function (i) { play.goto(i); },
+      index: function () { return play.index(); }
+    };
   });
 })();
 
