@@ -1816,7 +1816,10 @@ window.Widgets = window.Widgets || {};
   K.register('binary-search-bounds', function (host, opts) {
     var dfltArray = [10, 20, 20, 30, 40, 50, 60];
 
+    // 원본 길이를 먼저 재 둔다. 잘라 놓고 말하지 않으면 위젯이 거짓말을 한다.
+    var rawLen = isArr(opts.array) ? opts.array.length : 0;
     var a = toNums(opts.array, dfltArray).slice().sort(function (x, y) { return x - y; });
+    var clamped = rawLen > a.length ? rawLen : 0;
     var target = toInt(opts.target, 35);
 
     var pairMode = String(opts.mode || '') === 'pair' || isArr(opts.goals);
@@ -1890,6 +1893,9 @@ window.Widgets = window.Widgets || {};
     var title = pairMode
       ? 'lower_bound 와 upper_bound — 술어 한 글자의 차이'
       : '이분 탐색의 경계 — 불변식 하나, 측도 하나';
+    // 칸 글자가 뭉개지지 않게 자르는 것은 옳지만, 조용히 자르면 독자는
+    // 화면의 배열이 넘긴 배열이라고 믿는다.
+    if (clamped) title += '  ·  배열이 길어 앞 ' + a.length + '개만 그린다 (넘긴 것은 ' + clamped + '개)';
 
     var ui = K.frame(host, { title: title });
 
@@ -1942,6 +1948,36 @@ window.Widgets = window.Widgets || {};
       aWrap.appendChild(aIn);
       ui.slot.appendChild(aWrap);
     }
+
+    // 색만으로 정보를 나르면 색을 구분하지 못하는 독자에게 위젯이 사라진다(계약 §5).
+    // 칸에는 값이 글자로 있고 버려진 칸에는 취소선이 있지만, 색이 무엇을 뜻하는지는 적어 둔다.
+    (function legend() {
+      var T = K.tokens(ui.stage);
+      var items = [
+        ['살아 있는 구간', T.wFrontier],
+        ['이번에 버릴 절반', T.boxDanger],
+        ['mid', T.accent],
+        ['반환 위치', T.wPath]
+      ];
+      var wrapEl = K.el('div', 'wk-legend');
+      items.forEach(function (it) {
+        var sp = K.el('span');
+        var i = K.el('i');
+        i.style.background = it[1];
+        sp.appendChild(i);
+        sp.appendChild(document.createTextNode(it[0]));
+        wrapEl.appendChild(sp);
+      });
+      ui.slot.appendChild(wrapEl);
+      // 테마가 바뀌면 범례 색도 따라가야 한다. 캔버스만 다시 그리면 범례만 옛 테마로 남는다.
+      K.onThemeChange(function () {
+        var T2 = K.tokens(ui.stage);
+        var cs = [T2.wFrontier, T2.boxDanger, T2.accent, T2.wPath];
+        Array.prototype.forEach.call(wrapEl.querySelectorAll('i'), function (n, k) {
+          n.style.background = cs[k];
+        });
+      });
+    })();
 
     // ── 레이아웃 ───────────────────────────────────────────────────────────
 
