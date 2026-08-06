@@ -184,6 +184,43 @@ def collect_classify(cid: str, num: str, title: str, md: str) -> list[dict]:
     return items
 
 
+# `::: quiz` 안에서 대표문제 한 줄의 형식(§4-8): "**N. 백준 NNNN 제목 (난도)**"
+# 뒤에 선택적으로 "— URL"이 붙는다. 손추적·검증 과제처럼 문제 번호가 없는 항목은
+# 이 패턴에 안 걸려 자동으로 제외된다 — 색인은 "대표문제"만 다룬다(A-10, §4-8).
+PROBLEM_RE = re.compile(
+    r"\*\*\d+\.\s*백준\s*(\d+)\s+(.+?)\s*\(([^)]+)\)\s*\*\*"
+    r"(?:[ \t]*[—–-][ \t]*(https://www\.acmicpc\.net/problem/\d+))?"
+)
+
+
+def collect_problems(cid: str, num: str, title: str, part_num: str, part_title: str, md: str) -> list[dict]:
+    """한 챕터의 `::: quiz` 안 대표문제를 window.BOOK.problems 항목으로.
+
+    난도 문자열 앞부분(브론즈/실버/골드/플래티넘)을 등급 필터용으로 따로 뽑는다.
+    """
+    items = []
+    for _start, body in iter_boxes(md, "quiz"):
+        text = "\n".join(body)
+        for m in PROBLEM_RE.finditer(text):
+            boj_id, boj_title, diff, url = m.groups()
+            tier_m = re.match(r"(브론즈|실버|골드|플래티넘|다이아몬드)", diff)
+            items.append(
+                {
+                    "id": boj_id,
+                    "title": boj_title.strip(),
+                    "diff": diff.strip(),
+                    "tier": tier_m.group(1) if tier_m else "",
+                    "url": url or f"https://www.acmicpc.net/problem/{boj_id}",
+                    "chapter": cid,
+                    "num": num,
+                    "chTitle": title,
+                    "partNum": part_num,
+                    "partTitle": part_title,
+                }
+            )
+    return items
+
+
 # --------------------------------------------------------------------------
 # 자산 버전 도장
 # --------------------------------------------------------------------------
@@ -313,6 +350,7 @@ def build() -> dict:
 
     docs: dict[str, str] = {}
     classify: list[dict] = []
+    problems: list[dict] = []
     seen: set[str] = set()
     missing: list[str] = []
     total_chars = 0
@@ -334,6 +372,9 @@ def build() -> dict:
             docs[cid] = md
             total_chars += word_count(md)
             classify.extend(collect_classify(cid, ch["num"], ch["title"], md))
+            problems.extend(
+                collect_problems(cid, ch["num"], ch["title"], part["num"], part["title"], md)
+            )
 
     # 목차에 없는 고아 마크다운 경고
     for stem, paths in sorted((_doc_index or {}).items()):
@@ -363,6 +404,9 @@ def build() -> dict:
         # 본문에서 처음 만났을 때 배우는 것이 기본 경로이고(§4-3), 이 페이지는
         # 돌아와서 찾는 곳이다.
         "glossary": glossary,
+        # 문제 색인(§7·§8). ::: quiz 의 대표문제를 Part·유형별로 모은 것 —
+        # docs/PROBLEM_INDEX.md 와 같은 데이터에서 나온다(tools/export_problem_index.py).
+        "problems": problems,
     }
 
     OUT.parent.mkdir(parents=True, exist_ok=True)
@@ -384,6 +428,7 @@ def build() -> dict:
         "total": len(seen),
         "missing": missing,
         "classify": len(classify),
+        "problems": len(problems),
         "widgets": widgets,
         "chars": total_chars,
         "size": OUT.stat().st_size,
@@ -396,7 +441,7 @@ def report(st: dict) -> None:
     print(
         f"빌드 완료: {st['written']}/{st['total']} 절 · "
         f"본문 {st['chars']:,}자 (약 {pages:,.0f}쪽) · "
-        f"유형판별 {st['classify']}개 · 위젯 {st['widgets']}개 · "
+        f"유형판별 {st['classify']}개 · 대표문제 {st['problems']}개 · 위젯 {st['widgets']}개 · "
         f"번들 {st['size'] / 1024:,.0f} KB · v{st['ver']}"
     )
     if st["missing"]:
