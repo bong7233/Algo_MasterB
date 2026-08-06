@@ -2459,6 +2459,823 @@ window.Widgets = window.Widgets || {};
   });
 })();
 
+/* ==== bloom-filter.js ==== */
+/* bloom-filter.js — "없다"는 항상 옳다, "있다"는 틀릴 수 있다
+ *
+ * 이 위젯이 가르치려는 단 하나:
+ *   블룸 필터의 오류는 **한 방향으로만** 난다. 조회한 k개 칸 중 하나라도
+ *   꺼져 있으면 그 원소는 확실히 넣은 적이 없다. k개가 전부 켜져 있어도
+ *   넣었다는 보장은 없다 — 다른 원소들이 우연히 그 칸들을 채웠을 수 있다.
+ *
+ * 왜 비트 배열 그림과 거짓양성 표시를 같이 두는가
+ *   "비트가 켜진다"는 삽입 애니메이션만으로는 비대칭이 안 보인다. 조회
+ *   결과가 "확실히 없음"인지 "아마 있음(틀릴 수 있음)"인지 다른 색으로
+ *   갈라야, 왜 삭제를 지원할 수 없는지(비트 하나가 여러 원소를 겸업한다)
+ *   가 화면에서 바로 보인다.
+ *
+ * ── opts (챕터가 넘기는 것) ──────────────────────────────────────────────
+ *   m       : 비트 배열 크기 (기본 40)
+ *   k       : 해시 함수 개수 (기본 3)
+ *   items   : 삽입할 원소들 (문자열 배열)
+ *   query   : 조회할 원소 (문자열)
+ *   mode    : "insert-then-query" (기본) — items 를 전부 넣은 뒤 query 를 조회
+ *   show    : ["bits","hashPositions","falsePositive"] 중 원하는 것. 기본 전부
+ */
+(function () {
+  'use strict';
+  var K = window.WidgetKit;
+  if (!K) return;
+
+  var FONT = '-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif';
+  var MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace';
+
+  function isArr(v) { return !!v && typeof v === 'object' && typeof v.length === 'number' && typeof v !== 'string'; }
+  function clampInt(v, lo, hi, d) { var n = parseInt(v, 10); if (!isFinite(n)) return d; return Math.max(lo, Math.min(hi, n)); }
+
+  // FNV-1a 64비트 — 챕터 본문의 dual 코드와 같은 해시. 솔트 "i#item" 으로 k개의 독립된 칸을 만든다.
+  // JS Number 는 64비트 정수를 정확히 표현 못 하므로 BigInt 를 쓴다.
+  var FNV_PRIME = 0x100000001b3n;
+  var FNV_OFFSET = 0xcbf29ce484222325n;
+  var MASK64 = 0xFFFFFFFFFFFFFFFFn;
+  function fnv1a64(s) {
+    var h = FNV_OFFSET;
+    for (var i = 0; i < s.length; i++) {
+      h ^= BigInt(s.charCodeAt(i) & 0xff);
+      h = (h * FNV_PRIME) & MASK64;
+    }
+    return h;
+  }
+  function positions(item, m, k) {
+    var out = [];
+    for (var i = 0; i < k; i++) out.push(Number(fnv1a64(i + '#' + item) % BigInt(m)));
+    return out;
+  }
+
+  function run(m, k, items, query) {
+    var bits = new Array(m).fill(0);
+    var steps = [];
+
+    function snap(kind, note, extra) {
+      var s = { kind: kind, bits: bits.slice(), note: note };
+      if (extra) for (var kk in extra) s[kk] = extra[kk];
+      steps.push(s);
+    }
+    snap('init', '비트 배열 m=' + m + '칸, 전부 0. k=' + k + '개의 해시로 원소마다 ' + k + '칸을 켠다.');
+
+    items.forEach(function (it) {
+      var pos = positions(it, m, k);
+      var newlySet = [];
+      pos.forEach(function (p) { if (!bits[p]) newlySet.push(p); bits[p] = 1; });
+      snap('insert', 'insert("' + it + '") — 칸 [' + pos.join(', ') + ']을 켠다' +
+        (newlySet.length < pos.length ? ' (이미 켜진 칸과 겹침: ' + (pos.length - newlySet.length) + '개)' : '') + '.',
+        { item: it, pos: pos });
+    });
+
+    var qPos = positions(query, m, k);
+    var allSet = qPos.every(function (p) { return bits[p] === 1; });
+    var actuallyInserted = items.indexOf(query) >= 0;
+    var isFalsePositive = allSet && !actuallyInserted;
+    snap('query',
+      'query("' + query + '") — 칸 [' + qPos.join(', ') + '] 확인. ' +
+      (allSet
+        ? (isFalsePositive
+          ? '전부 켜져 있다 — 하지만 넣은 적이 없다. **거짓양성.**'
+          : '전부 켜져 있다 — "아마 있음" (실제로 넣었다).')
+        : '하나 이상 꺼져 있다 — "확실히 없음".'),
+      { pos: qPos, allSet: allSet, actuallyInserted: actuallyInserted, isFalsePositive: isFalsePositive });
+
+    return { steps: steps, isFalsePositive: isFalsePositive, allSet: allSet, actuallyInserted: actuallyInserted };
+  }
+
+  K.register('bloom-filter', function (host, opts) {
+    var m = clampInt(opts.m, 8, 200, 40);
+    var k = clampInt(opts.k, 1, 8, 3);
+    var items = isArr(opts.items) ? opts.items.slice(0, 12).map(String) : ['cat', 'dog', 'bird'];
+    var query = (typeof opts.query === 'string') ? opts.query : 'rat';
+    var show = isArr(opts.show) ? opts.show.map(String) : ['bits', 'hashPositions', 'falsePositive'];
+    var has = function (x) { return show.indexOf(x) >= 0; };
+
+    var data = run(m, k, items, query);
+    var ui = K.frame(host, { title: '블룸 필터 — "없다"는 항상 옳다, "있다"는 틀릴 수 있다' });
+
+    (function legend() {
+      var T = K.tokens(ui.stage);
+      var items2 = [['꺼짐(0)', T.bgElev], ['켜짐(1)', T.wFrontier], ['이번 스텝이 켠 칸', T.accent], ['거짓양성', T.boxDanger]];
+      var el = K.el('div', 'wk-legend');
+      items2.forEach(function (it) {
+        var sp = K.el('span'), ic = K.el('i');
+        ic.style.background = it[1];
+        sp.appendChild(ic); sp.appendChild(document.createTextNode(it[0]));
+        el.appendChild(sp);
+      });
+      ui.slot.appendChild(el);
+      K.onThemeChange(function () {
+        var T2 = K.tokens(ui.stage);
+        var cs = [T2.bgElev, T2.wFrontier, T2.accent, T2.boxDanger];
+        Array.prototype.forEach.call(el.querySelectorAll('i'), function (n, kk) { n.style.background = cs[kk]; });
+      });
+    })();
+
+    var PAD = 12;
+
+    function layout(w) {
+      var inner = Math.max(240, w - PAD * 2);
+      var perRow = Math.max(8, Math.floor(inner / 22));
+      var rows = Math.ceil(m / perRow);
+      var cell = Math.min(28, Math.floor(inner / perRow));
+      return { inner: inner, perRow: perRow, rows: rows, cell: cell, x0: PAD, height: PAD + rows * (cell + 4) + 50 + PAD };
+    }
+
+    function draw(ctx, size, T) {
+      var l = layout(size.w);
+      var i = play ? play.index() : 0;
+      var st = data.steps[Math.min(i, data.steps.length - 1)];
+      var curPos = st.pos || [];
+      var isFP = st.kind === 'query' && st.isFalsePositive;
+
+      ctx.save();
+      for (var b = 0; b < m; b++) {
+        var row = Math.floor(b / l.perRow), col = b % l.perRow;
+        var x = l.x0 + col * (l.cell + 2), y = PAD + row * (l.cell + 4);
+        var isTouched = curPos.indexOf(b) >= 0;
+        var fill = st.bits[b] ? T.wFrontier : T.bgElev;
+        var stroke = T.border, thick = false;
+        if (isTouched) {
+          thick = true;
+          if (st.kind === 'query') { stroke = isFP ? T.boxDanger : (st.allSet ? T.wPath : T.boxDanger); fill = isFP ? T.boxDanger : fill; }
+          else { stroke = T.accent; fill = T.accent; }
+        }
+        ctx.fillStyle = fill; ctx.fillRect(x, y, l.cell - 2, l.cell - 2);
+        ctx.strokeStyle = stroke; ctx.lineWidth = thick ? 2 : 1;
+        ctx.strokeRect(x + 0.5, y + 0.5, l.cell - 3, l.cell - 3);
+        if (l.cell >= 16) {
+          ctx.fillStyle = st.bits[b] ? T.bg : T.fgFaint;
+          ctx.font = '9px ' + MONO; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          ctx.fillText(String(b), x + l.cell / 2 - 1, y + l.cell / 2 - 1);
+        }
+      }
+      var yEnd = PAD + l.rows * (l.cell + 4) + 8;
+      ctx.restore();
+
+      ctx.save();
+      ctx.font = '600 12px ' + FONT;
+      ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+      if (st.kind === 'query') {
+        ctx.fillStyle = isFP ? T.boxDanger : (st.allSet ? T.wPath : T.fg);
+      } else {
+        ctx.fillStyle = T.fgDim;
+      }
+      var lines = wrapText(ctx, st.note.replace(/\*\*/g, ''), size.w - PAD * 2);
+      lines.forEach(function (t, idx) { ctx.fillText(t, l.x0, yEnd + idx * 15); });
+      ctx.restore();
+    }
+
+    function wrapText(ctx, text, maxW) {
+      var words = text.split(' '), lines = [], cur = '';
+      for (var i = 0; i < words.length; i++) {
+        var t = cur ? cur + ' ' + words[i] : words[i];
+        if (ctx.measureText(t).width > maxW && cur) { lines.push(cur); cur = words[i]; } else cur = t;
+      }
+      if (cur) lines.push(cur);
+      return lines;
+    }
+
+    var cv = K.canvas(ui.stage, { height: function (w) { return layout(w).height; }, draw: draw });
+    var play = K.player(ui, {
+      total: function () { return data.steps.length; },
+      render: function () { cv.redraw(); },
+      label: function (i) { return data.steps[Math.min(i, data.steps.length - 1)].note.replace(/\*\*/g, '') || ''; }
+    });
+    play.draw();
+
+    host.__widget = {
+      isFalsePositive: function () { return data.isFalsePositive; },
+      allSet: function () { return data.allSet; },
+      steps: function () { return data.steps.length; },
+      goto: function (i) { play.goto(i); },
+      positions: function (item) { return positions(item, m, k); }
+    };
+  });
+})();
+
+/* ==== btree-ops.js ==== */
+/* btree-ops.js — 뿌리 위에 새 뿌리가 생기는 방식으로 큰다
+ *
+ * 이 위젯이 가르치려는 단 하나:
+ *   **B-Tree는 리프가 늘어나는 게 아니라 뿌리 위에 새 뿌리가 생기며 자란다.**
+ *   노드가 키 한도를 넘으면 가운데 키가 부모로 올라가고 나머지가 좌우로
+ *   갈라진다. 그 갈라짐이 뿌리까지 전파되면 트리 전체의 높이가 하나 는다.
+ *
+ * 왜 블록 읽기 카운터가 트리 그림보다 중요한가
+ *   B-Tree의 존재 이유는 "노드 하나 = 디스크 블록 하나" 다. 예쁜 트리
+ *   그림은 이진 탐색 트리와 구별이 안 된다. 방문한 노드마다 카운터가
+ *   하나씩 오르는 것을 보여야 "order 를 올리면 왜 접근 횟수가 주는가"가
+ *   손에 잡힌다.
+ *
+ * ── opts (챕터가 넘기는 것) ──────────────────────────────────────────────
+ *   order  : 정수 3~8 (기본 4). 노드당 최대 자식 수 = 최대 키 수 + 1
+ *   ops    : [["insert",key] | ["search",key], ...]
+ *   mode   : "disk-blocks" (기본) — 블록 읽기 누적 카운터를 보인다
+ */
+(function () {
+  'use strict';
+  var K = window.WidgetKit;
+  if (!K) return;
+
+  var FONT = '-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif';
+  var MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace';
+  var MAX_OPS = 60;
+
+  function isArr(v) { return !!v && typeof v === 'object' && typeof v.length === 'number' && typeof v !== 'string'; }
+  function clampInt(v, lo, hi, d) { var n = parseInt(v, 10); if (!isFinite(n)) return d; return Math.max(lo, Math.min(hi, n)); }
+  function rrect(ctx, x, y, w, h, r) {
+    r = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+  }
+
+  // ─── B-Tree 본체. 표준 삽입 알고리즘: 리프에 넣고, 넘치면 위로 분할 전파 ──
+
+  function makeNode(leaf) { return { keys: [], children: [], leaf: leaf, id: 0 }; }
+
+  function Tree(order) {
+    this.order = order;    // 최대 자식 수
+    this.maxKeys = order - 1;
+    this.root = makeNode(true);
+    this.nextId = 1;
+  }
+
+  Tree.prototype.assignId = function (n) { n.id = this.nextId++; };
+
+  // 노드를 반으로 갈라 [왼쪽, 올릴키, 오른쪽]을 돌려준다.
+  Tree.prototype.splitChild = function (node) {
+    var mid = Math.floor(node.keys.length / 2);
+    var up = node.keys[mid];
+    var left = makeNode(node.leaf);
+    var right = makeNode(node.leaf);
+    left.keys = node.keys.slice(0, mid);
+    right.keys = node.keys.slice(mid + 1);
+    if (!node.leaf) {
+      left.children = node.children.slice(0, mid + 1);
+      right.children = node.children.slice(mid + 1);
+    }
+    this.assignId(left); this.assignId(right);
+    return { left: left, up: up, right: right };
+  };
+
+  /* 삽입. 방문 경로를 스텝으로 기록하고, 분할이 일어난 지점을 표시한다.
+   * 재귀 대신 스택으로 짜서 '어느 노드가 갈라졌는지'를 스텝 목록에 명시적으로 남긴다. */
+  Tree.prototype.insert = function (key, onVisit, onSplit) {
+    var path = [];   // [{node, idx}] — 뿌리부터 리프까지
+    var node = this.root;
+    while (true) {
+      onVisit(node);
+      path.push(node);
+      if (node.leaf) break;
+      var i = 0;
+      while (i < node.keys.length && key > node.keys[i]) i++;
+      node = node.children[i];
+    }
+    var leaf = path[path.length - 1];
+    var pos = 0;
+    while (pos < leaf.keys.length && leaf.keys[pos] < key) pos++;
+    leaf.keys.splice(pos, 0, key);
+
+    // 리프에서 위로 올라가며 넘치면 분할한다.
+    for (var d = path.length - 1; d >= 0; d--) {
+      var cur = path[d];
+      if (cur.keys.length <= this.maxKeys) break;
+      var sp = this.splitChild(cur);
+      onSplit(cur, sp);
+      if (d === 0) {
+        var newRoot = makeNode(false);
+        this.assignId(newRoot);
+        newRoot.keys = [sp.up];
+        newRoot.children = [sp.left, sp.right];
+        this.root = newRoot;
+      } else {
+        var parent = path[d - 1];
+        var ci = parent.children.indexOf(cur);
+        parent.children.splice(ci, 1, sp.left, sp.right);
+        parent.keys.splice(ci, 0, sp.up);
+      }
+    }
+  };
+
+  Tree.prototype.search = function (key, onVisit) {
+    var node = this.root;
+    while (node) {
+      onVisit(node);
+      var i = 0;
+      while (i < node.keys.length && key > node.keys[i]) i++;
+      if (i < node.keys.length && node.keys[i] === key) return true;
+      if (node.leaf) return false;
+      node = node.children[i];
+    }
+    return false;
+  };
+
+  // 트리를 순수 데이터(스냅샷)로 복제한다 — 스텝마다 통째로 저장해 되감기를 결정적으로 만든다.
+  function snapshotTree(root) {
+    return (function walk(n) {
+      return { keys: n.keys.slice(), leaf: n.leaf, id: n.id, children: n.children.map(walk) };
+    })(root);
+  }
+
+  function depth(n) { return n.leaf ? 1 : 1 + Math.max.apply(null, n.children.map(depth)); }
+
+  // ─── 실행 로그 만들기 ────────────────────────────────────────────────────
+
+  function run(order, ops) {
+    var tree = new Tree(order);
+    var steps = [];
+    var blocks = 0;
+    var found = null;
+
+    function push(kind, extra) {
+      var s = { kind: kind, blocks: blocks, tree: snapshotTree(tree.root), found: found };
+      if (extra) for (var k in extra) s[k] = extra[k];
+      steps.push(s);
+    }
+
+    push('init', { note: '빈 트리. order=' + order + ', 노드당 키 최대 ' + (order - 1) + '개.' });
+
+    ops.forEach(function (op) {
+      var kind = op[0], key = op[1];
+      found = null;
+      if (kind === 'insert') {
+        var splitNodes = [];
+        tree.insert(key,
+          function () { blocks += 1; push('visit', { op: 'insert', key: key, note: key + ' 삽입 — 노드 방문. 블록 읽기 ' + blocks + '.' }); },
+          function (orig, sp) { splitNodes.push(sp); push('split', { op: 'insert', key: key, splitAt: orig.id, note: '노드가 넘쳐 갈라진다. 가운데 키 ' + sp.up + '이 부모로 올라간다.' }); }
+        );
+        push('done', { op: 'insert', key: key, note: key + ' 삽입 완료. 이번 연산의 블록 읽기 ' + blocks + '.' , opDone: true });
+      } else {
+        var startBlocks = blocks;
+        var ok = tree.search(key, function () { blocks += 1; push('visit', { op: 'search', key: key, note: key + ' 탐색 — 노드 방문. 블록 읽기 ' + blocks + '.' }); });
+        found = ok;
+        push('done', { op: 'search', key: key, note: key + (ok ? ' 발견' : ' 없음') + '. 블록 읽기 ' + (blocks - startBlocks) + '회.', opDone: true, foundKey: ok });
+      }
+    });
+
+    return { steps: steps, finalBlocks: blocks };
+  }
+
+  // ─── 위젯 ────────────────────────────────────────────────────────────────
+
+  K.register('btree-ops', function (host, opts) {
+    var order = clampInt(opts.order, 3, 8, 4);
+    var rawOps = isArr(opts.ops) ? opts.ops : [];
+    var ops = [];
+    for (var i = 0; i < rawOps.length && ops.length < MAX_OPS; i++) {
+      var o = rawOps[i];
+      if (!isArr(o) || o.length < 2) continue;
+      var kind = (o[0] === 'search') ? 'search' : 'insert';
+      var key = parseInt(o[1], 10);
+      if (isFinite(key)) ops.push([kind, key]);
+    }
+    if (!ops.length) ops = [['insert', 10], ['insert', 20], ['insert', 5]];
+
+    var title = 'B-Tree — 뿌리 위에 새 뿌리가 생기는 방식으로 큰다';
+    if (isArr(opts.ops) && opts.ops.length > ops.length) title += '  ·  연산이 많아 앞 ' + ops.length + '개만 재생';
+
+    var data = run(order, ops);
+    var ui = K.frame(host, { title: title });
+
+    (function legend() {
+      var T = K.tokens(ui.stage);
+      var items = [['방문', T.wFrontier], ['분할된 노드', T.accent], ['찾음/부재', T.wPath]];
+      var el = K.el('div', 'wk-legend');
+      items.forEach(function (it) {
+        var sp = K.el('span'), ic = K.el('i');
+        ic.style.background = it[1];
+        sp.appendChild(ic); sp.appendChild(document.createTextNode(it[0]));
+        el.appendChild(sp);
+      });
+      ui.slot.appendChild(el);
+      K.onThemeChange(function () {
+        var T2 = K.tokens(ui.stage);
+        var cs = [T2.wFrontier, T2.accent, T2.wPath];
+        Array.prototype.forEach.call(el.querySelectorAll('i'), function (n, k) { n.style.background = cs[k]; });
+      });
+    })();
+
+    var PAD = 12, LEVEL_H = 64, NODE_MIN_W = 34;
+
+    function layoutTree(root) {
+      // 리프를 가로로 늘어놓고 내부 노드는 자식 중앙에 둔다(표준 트리 레이아웃).
+      var leafX = 0;
+      var pos = {};
+      (function assign(n) {
+        if (n.leaf) { pos[n.id] = leafX; leafX += 1; return; }
+        n.children.forEach(assign);
+        var xs = n.children.map(function (c) { return pos[c.id]; });
+        pos[n.id] = (Math.min.apply(null, xs) + Math.max.apply(null, xs)) / 2;
+      })(root);
+      return { pos: pos, leafCount: Math.max(1, leafX) };
+    }
+
+    function nodeW(n) { return Math.max(NODE_MIN_W, 22 * n.keys.length + 12); }
+
+    function layout(w) {
+      var st = data.steps[play ? play.index() : 0];
+      var lt = layoutTree(st.tree);
+      var d = depth(st.tree);
+      var cellW = Math.max(50, Math.min(90, (w - PAD * 2) / lt.leafCount));
+      return {
+        w: w, cellW: cellW, height: PAD + d * LEVEL_H + 60 + PAD,
+        x0: PAD, treeW: cellW * lt.leafCount
+      };
+    }
+
+    function draw(ctx, size, T) {
+      var l = layout(size.w);
+      var i = play ? play.index() : 0;
+      var st = data.steps[Math.min(i, data.steps.length - 1)];
+      var lt = layoutTree(st.tree);
+
+      // x 오프셋: 트리가 캔버스보다 좁으면 가운데로.
+      var offX = l.x0 + Math.max(0, (size.w - PAD * 2 - l.treeW) / 2);
+
+      function nodeCenter(n) { return { x: offX + lt.pos[n.id] * l.cellW + l.cellW / 2, y: PAD + n._level * LEVEL_H + 20 }; }
+
+      // 레벨을 매긴다.
+      (function setLevel(n, lev) { n._level = lev; n.children.forEach(function (c) { setLevel(c, lev + 1); }); })(st.tree, 0);
+
+      ctx.save();
+      // 간선
+      (function edges(n) {
+        var c0 = nodeCenter(n);
+        n.children.forEach(function (c) {
+          var c1 = nodeCenter(c);
+          ctx.strokeStyle = T.border; ctx.lineWidth = 1.2;
+          ctx.beginPath(); ctx.moveTo(c0.x, c0.y + 14); ctx.lineTo(c1.x, c1.y - 14); ctx.stroke();
+          edges(c);
+        });
+      })(st.tree);
+
+      // 노드
+      (function nodes(n) {
+        var c = nodeCenter(n);
+        var w = nodeW(n), h = 28;
+        var isVisited = st.op != null && st.kind === 'visit' && st.blocks != null;
+        var isThisNode = (st.kind === 'visit' || st.kind === 'split') && n.id === (st.visitedId || st.splitAt);
+        var wasSplit = st.kind === 'split' && n.id === st.splitAt;
+        var fill = T.bgElev, stroke = T.border;
+        if (wasSplit) { fill = T.accent; stroke = T.accent; }
+        rrect(ctx, c.x - w / 2, c.y - h / 2, w, h, 5);
+        ctx.fillStyle = fill; ctx.fill();
+        ctx.strokeStyle = stroke; ctx.lineWidth = wasSplit ? 2 : 1; ctx.stroke();
+        ctx.fillStyle = wasSplit ? T.bg : T.fg;
+        ctx.font = '600 12px ' + MONO;
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText(n.keys.join(' | '), c.x, c.y);
+        n.children.forEach(nodes);
+      })(st.tree);
+
+      // 찾은 키를 하이라이트(탐색 완료 스텝)
+      if (st.kind === 'done' && st.op === 'search') {
+        ctx.font = '600 11px ' + FONT;
+        ctx.fillStyle = st.foundKey ? T.wPath : T.boxDanger;
+      }
+      ctx.restore();
+
+      // 블록 읽기 카운터
+      var y = l.height - PAD - 20;
+      ctx.save();
+      ctx.font = '11px ' + FONT;
+      ctx.fillStyle = T.fgFaint;
+      ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.fillText('누적 블록 읽기', PAD, y);
+      var lw = ctx.measureText('누적 블록 읽기').width;
+      ctx.font = '600 15px ' + MONO;
+      ctx.fillStyle = T.accent;
+      ctx.fillText(String(st.blocks), PAD + lw + 8, y);
+      ctx.restore();
+    }
+
+    var cv = K.canvas(ui.stage, { height: function (w) { return layout(w).height; }, draw: draw });
+    var play = K.player(ui, {
+      total: function () { return data.steps.length; },
+      render: function () { cv.redraw(); },
+      label: function (i) { return data.steps[Math.min(i, data.steps.length - 1)].note || ''; }
+    });
+    play.draw();
+
+    host.__widget = {
+      finalBlocks: function () { return data.finalBlocks; },
+      steps: function () { return data.steps.length; },
+      goto: function (i) { play.goto(i); },
+      rootKeys: function () { return data.steps[data.steps.length - 1].tree.keys.slice(); },
+      height: function () { return depth(data.steps[data.steps.length - 1].tree); }
+    };
+  });
+})();
+
+/* ==== cache-policy.js ==== */
+/* cache-policy.js — LRU에게는 "방금 한 번 쓰고 안 쓸 것"과 "곧 또 쓸 것"이 구분되지 않는다
+ *
+ * 이 위젯이 가르치려는 단 하나:
+ *   순환 스캔이 캐시보다 크면 LRU는 핫 키를 방어하지 못한다. 스캔 키를
+ *   한 번 쓰는 것도 "방금 사용"으로 잡혀 핫 키보다 우선권을 갖기 때문이다.
+ *   LFU는 빈도를 보므로 핫 키가 한 번 벌어진 뒤로는 스캔에 안 밀린다.
+ *
+ * 왜 낱개 접근이 아니라 사이클 단위로 재생하는가
+ *   본문의 트레이스는 부트스트랩 + 20사이클 × (핫 5 + 스캔 40) = 910회
+ *   접근이다. 낱개로 스텝을 만들면 900개가 넘어 재생기 자체가 못 쓰게
+ *   된다. 사이클 하나(핫 키 전부 + 그 사이클의 스캔 전부)를 한 스텝으로
+ *   묶어도 "핫 히트율이 사이클마다 어떻게 벌어지는가"라는 이 위젯의
+ *   논지는 그대로 남는다 — 그 벌어짐이 곡선으로 보인다.
+ *
+ * ── opts (챕터가 넘기는 것) ──────────────────────────────────────────────
+ *   policies : ["lru","lfu"] 중 비교할 것들 (기본 둘 다)
+ *   capacity : 캐시 용량 (기본 20)
+ *   trace    : 이름 붙은 접근 패턴. "hot5-scan40x20" = 핫키 5개, 20사이클,
+ *              사이클당 스캔 40개(본문 §4 build_trace 와 동일 규칙)
+ *   metric   : "hot-only"(기본, 핫 키 기준 히트율) | "overall"
+ */
+(function () {
+  'use strict';
+  var K = window.WidgetKit;
+  if (!K) return;
+
+  var FONT = '-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif';
+  var MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace';
+
+  function isArr(v) { return !!v && typeof v === 'object' && typeof v.length === 'number' && typeof v !== 'string'; }
+  function clampInt(v, lo, hi, d) { var n = parseInt(v, 10); if (!isFinite(n)) return d; return Math.max(lo, Math.min(hi, n)); }
+  function rrect(ctx, x, y, w, h, r) {
+    r = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+  }
+
+  function parseTrace(name) {
+    // "hot5-scan40x20" -> hot=5, scanLen=40, cycles=20
+    var m = /hot(\d+)-scan(\d+)x(\d+)/.exec(String(name || ''));
+    if (m) return { hot: +m[1], scanLen: +m[2], cycles: +m[3] };
+    return { hot: 5, scanLen: 40, cycles: 20 };
+  }
+
+  // ─── 캐시 구현. 정확한 LRU/LFU여야 한다 — 결과를 지어내지 않는다. ─────────
+
+  function LRUCache(cap) {
+    this.cap = cap;
+    this.order = [];   // 앞이 MRU
+    this.set = {};
+    this.hits = 0; this.misses = 0;
+  }
+  LRUCache.prototype.access = function (key) {
+    var idx = this.order.indexOf(key);
+    if (idx >= 0) {
+      this.hits++;
+      this.order.splice(idx, 1); this.order.unshift(key);
+      return true;
+    }
+    this.misses++;
+    this.order.unshift(key); this.set[key] = true;
+    if (this.order.length > this.cap) { var ev = this.order.pop(); delete this.set[ev]; }
+    return false;
+  };
+  LRUCache.prototype.snapshot = function () { return this.order.slice(0, this.cap); };
+
+  function LFUCache(cap) {
+    this.cap = cap;
+    this.freq = {};    // key -> count
+    this.keys = [];    // 존재하는 키(순서 무관, 표시용 삽입 순서 근사 유지)
+    this.hits = 0; this.misses = 0;
+  }
+  LFUCache.prototype.access = function (key) {
+    if (key in this.freq) {
+      this.hits++;
+      this.freq[key]++;
+      return true;
+    }
+    this.misses++;
+    if (this.keys.length >= this.cap) {
+      // 최저 빈도를 축출. 동률이면 keys 배열의 앞(더 먼저 들어온 것)을 버린다.
+      var minKey = null, minF = Infinity;
+      for (var i = 0; i < this.keys.length; i++) {
+        var f = this.freq[this.keys[i]];
+        if (f < minF) { minF = f; minKey = this.keys[i]; }
+      }
+      delete this.freq[minKey];
+      this.keys.splice(this.keys.indexOf(minKey), 1);
+    }
+    this.keys.push(key);
+    this.freq[key] = 1;
+    return false;
+  };
+  LFUCache.prototype.snapshot = function () {
+    return this.keys.slice().sort(function (a, b) { return this.freq[b] - this.freq[a]; }.bind(this))
+      .map(function (k) { return { key: k, freq: this.freq[k] }; }.bind(this));
+  };
+
+  var IMPL = { lru: LRUCache, lfu: LFUCache };
+  var LABEL = { lru: 'LRU', lfu: 'LFU' };
+
+  function run(policies, cap, hotKeys, cycles, scanLen) {
+    var caches = {};
+    policies.forEach(function (p) { caches[p] = new IMPL[p](cap); });
+    var hotSet = {};
+    hotKeys.forEach(function (h) { hotSet[h] = true; });
+
+    var hotHits = {}, hotTotal = 0;
+    policies.forEach(function (p) { hotHits[p] = 0; });
+
+    var steps = [];
+    function snap(kind, note, extra) {
+      var contents = {};
+      policies.forEach(function (p) { contents[p] = caches[p].snapshot(); });
+      var hitRate = {};
+      policies.forEach(function (p) { hitRate[p] = hotTotal > 0 ? hotHits[p] / hotTotal : 0; });
+      var s = { kind: kind, note: note, contents: contents, hotHits: Object.assign({}, hotHits), hotTotal: hotTotal, hitRate: hitRate };
+      if (extra) for (var k in extra) s[k] = extra[k];
+      steps.push(s);
+    }
+
+    snap('init', '용량 ' + cap + '. 핫 키 ' + hotKeys.length + '개, ' + cycles + '사이클, 사이클당 스캔 ' + scanLen + '개.');
+
+    // 부트스트랩: 핫 키를 두 번씩 찍어 빈도 2를 만든다(LFU가 스캔보다 앞서게).
+    // 본문 §4 run() 은 부트스트랩 접근도 핫 키 히트율 분모에 포함한다 — 첫 접근은
+    // 미스, 두 번째 접근은 히트이므로 히트율 계산을 거기 맞춰야 본문 수치와 일치한다.
+    hotKeys.forEach(function (h) {
+      policies.forEach(function (p) {
+        var h1 = caches[p].access(h);
+        if (h1) hotHits[p]++;
+        var h2 = caches[p].access(h);
+        if (h2) hotHits[p]++;
+      });
+    });
+    hotTotal += 2 * hotKeys.length;
+    snap('bootstrap', '부트스트랩 — 핫 키를 두 번씩 찍어 빈도 2를 만든다(LFU 전용 장치, LRU엔 무해).');
+
+    for (var c = 0; c < cycles; c++) {
+      hotTotal += hotKeys.length;
+      hotKeys.forEach(function (h) {
+        policies.forEach(function (p) {
+          var wasHit = caches[p].access(h);
+          if (wasHit) hotHits[p]++;
+        });
+      });
+      for (var i = 0; i < scanLen; i++) {
+        var sk = 'scan' + (c * scanLen + i);
+        policies.forEach(function (p) { caches[p].access(sk); });
+      }
+      snap('cycle', '사이클 ' + (c + 1) + '/' + cycles + ' — 핫 키 ' + hotKeys.length + '개 + 스캔 ' + scanLen + '개.', { cycle: c + 1 });
+    }
+
+    var final = {};
+    policies.forEach(function (p) {
+      final[p] = { hits: caches[p].hits, misses: caches[p].misses, hotHitRate: hotTotal > 0 ? hotHits[p] / hotTotal : 0 };
+    });
+    snap('done', '완료. ' + policies.map(function (p) { return LABEL[p] + ' 핫 히트율 ' + (final[p].hotHitRate * 100).toFixed(1) + '%'; }).join(', ') + '.');
+
+    return { steps: steps, final: final };
+  }
+
+  K.register('cache-policy', function (host, opts) {
+    var policies = isArr(opts.policies) ? opts.policies.map(String).filter(function (p) { return IMPL[p]; }) : ['lru', 'lfu'];
+    if (!policies.length) policies = ['lru', 'lfu'];
+    var cap = clampInt(opts.capacity, 1, 64, 20);
+    var tp = parseTrace(opts.trace);
+    var hot = clampInt(tp.hot, 1, 12, 5);
+    var scanLen = clampInt(tp.scanLen, 1, 80, 40);
+    var cycles = clampInt(tp.cycles, 1, 40, 20);
+    var hotKeys = []; for (var i = 0; i < hot; i++) hotKeys.push('h' + i);
+
+    var data = run(policies, cap, hotKeys, cycles, scanLen);
+    var ui = K.frame(host, { title: 'LRU 대 LFU — 순환 스캔에 섞인 핫 키의 생존율' });
+
+    (function legend() {
+      var T = K.tokens(ui.stage);
+      var items = [['핫 키', T.wPath], ['스캔 키', T.fgFaint]];
+      var el = K.el('div', 'wk-legend');
+      items.forEach(function (it) {
+        var sp = K.el('span'), ic = K.el('i');
+        ic.style.background = it[1];
+        sp.appendChild(ic); sp.appendChild(document.createTextNode(it[0]));
+        el.appendChild(sp);
+      });
+      ui.slot.appendChild(el);
+      K.onThemeChange(function () {
+        var T2 = K.tokens(ui.stage);
+        var cs = [T2.wPath, T2.fgFaint];
+        Array.prototype.forEach.call(el.querySelectorAll('i'), function (n, k) { n.style.background = cs[k]; });
+      });
+    })();
+
+    var PAD = 12, ROW_H = 26;
+    var hotSet = {}; hotKeys.forEach(function (h) { hotSet[h] = true; });
+
+    function layout(w) {
+      var inner = Math.max(240, w - PAD * 2);
+      var panelH = ROW_H + 10;
+      return {
+        inner: inner, x0: PAD,
+        panelsH: policies.length * (panelH + 6),
+        chartH: 110,
+        height: PAD + policies.length * (panelH + 6) + 10 + 110 + 34 + PAD
+      };
+    }
+
+    function drawPanel(ctx, T, x, y, w, policy, contents) {
+      ctx.save();
+      ctx.font = '600 11px ' + FONT; ctx.fillStyle = T.fgDim; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.fillText(LABEL[policy], x, y + ROW_H / 2);
+      var lx = x + 40;
+      var chipW = Math.max(20, Math.min(30, (w - 40) / cap));
+      var items = policy === 'lru' ? contents.map(function (k) { return { key: k }; }) : contents;
+      for (var i = 0; i < cap; i++) {
+        var it = items[i];
+        rrect(ctx, lx + i * chipW, y, chipW - 2, ROW_H, 3);
+        if (it) {
+          ctx.fillStyle = hotSet[it.key] ? T.wPath : T.bgElev;
+          ctx.fill();
+          ctx.strokeStyle = T.border; ctx.lineWidth = 1; ctx.stroke();
+          ctx.fillStyle = hotSet[it.key] ? T.bg : T.fgFaint;
+          ctx.font = '9px ' + MONO; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          if (chipW >= 20) ctx.fillText(hotSet[it.key] ? it.key : '·', lx + i * chipW + chipW / 2 - 1, y + ROW_H / 2);
+        } else {
+          ctx.fillStyle = T.bgCode; ctx.fill();
+          ctx.strokeStyle = T.border; ctx.lineWidth = 1; ctx.stroke();
+        }
+      }
+      ctx.restore();
+    }
+
+    function drawChart(ctx, T, x, y, w, h, i) {
+      ctx.save();
+      rrect(ctx, x, y, w, h, 4);
+      ctx.fillStyle = T.bgElev; ctx.fill();
+      ctx.strokeStyle = T.border; ctx.lineWidth = 1; ctx.stroke();
+
+      var colors = { lru: T.boxDanger, lfu: T.wPath };
+      var pad = 8;
+      var plotW = w - pad * 2, plotH = h - pad * 2 - 14;
+      // y축: 0~100%
+      ctx.strokeStyle = T.border; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(x + pad, y + pad); ctx.lineTo(x + pad, y + pad + plotH); ctx.lineTo(x + pad + plotW, y + pad + plotH); ctx.stroke();
+
+      policies.forEach(function (p) {
+        ctx.strokeStyle = colors[p] || T.accent;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        var started = false;
+        for (var s = 0; s <= i; s++) {
+          var st = data.steps[s];
+          if (st.hotTotal === 0) continue;
+          var px = x + pad + (s / (data.steps.length - 1)) * plotW;
+          var py = y + pad + plotH - st.hitRate[p] * plotH;
+          if (!started) { ctx.moveTo(px, py); started = true; } else ctx.lineTo(px, py);
+        }
+        ctx.stroke();
+      });
+
+      ctx.font = '10px ' + MONO; ctx.fillStyle = T.fgFaint; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+      ctx.fillText('핫 키 히트율 (0~100%)', x + pad, y + h - 12);
+      ctx.restore();
+    }
+
+    function draw(ctx, size, T) {
+      var l = layout(size.w);
+      var i = play ? play.index() : 0;
+      var st = data.steps[Math.min(i, data.steps.length - 1)];
+      var y = PAD;
+      policies.forEach(function (p) {
+        drawPanel(ctx, T, l.x0, y, l.inner, p, st.contents[p]);
+        y += ROW_H + 10 + 6;
+      });
+      y += 6;
+      drawChart(ctx, T, l.x0, y, l.inner, l.chartH, i);
+      y += l.chartH + 10;
+
+      ctx.save();
+      ctx.font = '11px ' + FONT; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+      ctx.fillStyle = st.kind === 'done' ? T.wPath : T.fgDim;
+      ctx.fillText(st.note, l.x0, y);
+      ctx.restore();
+    }
+
+    var cv = K.canvas(ui.stage, { height: function (w) { return layout(w).height; }, draw: draw });
+    var play = K.player(ui, {
+      total: function () { return data.steps.length; },
+      render: function () { cv.redraw(); },
+      label: function (i) { return data.steps[Math.min(i, data.steps.length - 1)].note || ''; }
+    });
+    play.draw();
+
+    host.__widget = {
+      finalHitRate: function (p) { return data.final[p] ? data.final[p].hotHitRate : null; },
+      final: function () { return JSON.parse(JSON.stringify(data.final)); },
+      steps: function () { return data.steps.length; },
+      goto: function (i) { play.goto(i); }
+    };
+  });
+})();
+
 /* ==== complexity-plot.js ==== */
 /* complexity-plot — N 이 커질 때 복잡도 곡선이 벌어지는 것과 "1초 안에 되는 선"
  *
@@ -8706,6 +9523,268 @@ window.Widgets = window.Widgets || {};
   });
 })();
 
+/* ==== lsm-compaction.js ==== */
+/* lsm-compaction.js — 다시 읽고 다시 쓰기가 쓰기 증폭의 실체다
+ *
+ * 이 위젯이 가르치려는 단 하나:
+ *   **LSM은 제자리 갱신을 하지 않는다.** 같은 키를 다시 쓰면 새 조각에
+ *   새 값이 들어갈 뿐이고, 옛 값은 나중에 컴팩션이 조각들을 다시 읽어
+ *   합칠 때에야 버려진다. 그 "다시 읽고 다시 쓰기"가 쓰기 증폭이다.
+ *
+ * 왜 증폭 카운터가 조각 그림보다 중요한가
+ *   조각이 합쳐지는 애니메이션은 예쁘지만, 이 구조의 대가는 숫자로만
+ *   보인다 — 논리 쓰기 수 대비 디스크에 실제로 쓰인 항목 수. 그 비율이
+ *   1보다 커지는 순간(컴팩션이 옛 값을 다시 쓰는 순간)이 이 위젯의 핵심이다.
+ *
+ * ── opts (챕터가 넘기는 것) ──────────────────────────────────────────────
+ *   memtableCap    : 정수 (기본 2) — memtable 이 몇 개 키를 담으면 플러시하는가
+ *   l0Threshold    : 정수 (기본 2) — L0 조각이 몇 개 쌓이면 컴팩션하는가
+ *   ops            : [["put",key,value], ...]
+ *   showAmplification : true(기본) — 쓰기 증폭 배율을 하단에 표시
+ */
+(function () {
+  'use strict';
+  var K = window.WidgetKit;
+  if (!K) return;
+
+  var FONT = '-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif';
+  var MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace';
+  var MAX_OPS = 40;
+
+  function isArr(v) { return !!v && typeof v === 'object' && typeof v.length === 'number' && typeof v !== 'string'; }
+  function clampInt(v, lo, hi, d) { var n = parseInt(v, 10); if (!isFinite(n)) return d; return Math.max(lo, Math.min(hi, n)); }
+  function truthy(v, d) { return v === undefined || v === null ? d : !!v; }
+  function rrect(ctx, x, y, w, h, r) {
+    r = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+  }
+
+  /* memtable → L0 조각 여러 개 → 컴팩션으로 L1 하나. 최신 값이 이긴다.
+   * 논리 쓰기 수와 디스크에 실제로 쓰인 항목 수를 둘 다 센다 — 그 비가 쓰기 증폭이다. */
+  function run(memCap, l0Threshold, ops) {
+    var memtable = [];             // [{k,v}], 삽입 순서 유지, 같은 키는 갱신
+    var l0 = [];                   // [{id, entries:[{k,v}]}]
+    var l1 = null;                 // {id, entries:[{k,v}]} | null
+    var nextId = 1;
+    var logicalWrites = 0;
+    var diskWrites = 0;
+
+    var steps = [];
+    function memPut(k, v) {
+      var found = false;
+      for (var i = 0; i < memtable.length; i++) if (memtable[i].k === k) { memtable[i].v = v; found = true; break; }
+      if (!found) memtable.push({ k: k, v: v });
+    }
+    function sortedEntries(arr) { return arr.slice().sort(function (a, b) { return a.k - b.k; }); }
+
+    function snapshot(kind, note, extra) {
+      var s = {
+        kind: kind, note: note,
+        memtable: memtable.map(function (e) { return { k: e.k, v: e.v }; }),
+        l0: l0.map(function (t) { return { id: t.id, entries: t.entries.map(function (e) { return { k: e.k, v: e.v }; }) }; }),
+        l1: l1 ? { id: l1.id, entries: l1.entries.map(function (e) { return { k: e.k, v: e.v }; }) } : null,
+        logicalWrites: logicalWrites, diskWrites: diskWrites
+      };
+      if (extra) for (var k in extra) s[k] = extra[k];
+      steps.push(s);
+    }
+
+    snapshot('init', '빈 상태. memtableCap=' + memCap + ', l0Threshold=' + l0Threshold + '.');
+
+    ops.forEach(function (op) {
+      var k = op[1], v = op[2];
+      logicalWrites += 1;
+      memPut(k, v);
+      snapshot('put', 'put(' + k + ', ' + v + ') — memtable 에 반영. memtable ' + memtable.length + '/' + memCap + '.');
+
+      if (memtable.length >= memCap) {
+        var entries = sortedEntries(memtable);
+        var t = { id: nextId++, entries: entries };
+        l0.push(t);
+        diskWrites += entries.length;
+        memtable = [];
+        snapshot('flush', 'memtable 가 가득 차 T' + t.id + '로 플러시 — 정렬해 디스크에 순차로 통째 쓴다. 디스크 쓰기 누적 ' + diskWrites + '.', { flushedId: t.id });
+
+        if (l0.length >= l0Threshold) {
+          // 컴팩션: L0 조각 전부(+기존 L1)를 다시 읽어 병합, 같은 키는 더 나중(더 오른쪽) 조각이 이긴다.
+          var merging = l0.slice();
+          var mergedFrom = merging.map(function (t2) { return t2.id; });
+          if (l1) { merging = [l1].concat(merging); mergedFrom = [l1.id].concat(mergedFrom); }
+          var byKey = {};
+          var order = [];
+          merging.forEach(function (t2) {
+            t2.entries.forEach(function (e) {
+              if (!(e.k in byKey)) order.push(e.k);
+              byKey[e.k] = e.v;    // 나중 조각이 이긴다(더 최신)
+            });
+          });
+          var mergedEntries = sortedEntries(order.map(function (k2) { return { k: k2, v: byKey[k2] }; }));
+          var readCount = merging.reduce(function (s, t2) { return s + t2.entries.length; }, 0);
+          diskWrites += mergedEntries.length;   // 컴팩션이 다시 쓴 만큼도 디스크 쓰기다 — 이것이 증폭의 실체
+          var droppedCount = readCount - mergedEntries.length;
+          l0 = [];
+          l1 = { id: nextId++, entries: mergedEntries };
+          snapshot('compact',
+            '컴팩션 — T' + mergedFrom.join(', T') + '을 다시 읽어(' + readCount + '항목) 병합, ' +
+            droppedCount + '개의 옛 값을 버리고 L1=' + mergedEntries.length + '항목으로 다시 쓴다. 디스크 쓰기 누적 ' + diskWrites + '.',
+            { compactedFrom: mergedFrom, mergedInto: l1.id });
+        }
+      }
+    });
+
+    snapshot('done', '연산 ' + ops.length + '개 완료. 논리 쓰기 ' + logicalWrites + ' 대 디스크 쓰기 ' + diskWrites + '.');
+    return { steps: steps, logicalWrites: logicalWrites, diskWrites: diskWrites };
+  }
+
+  // ─── 위젯 ────────────────────────────────────────────────────────────────
+
+  K.register('lsm-compaction', function (host, opts) {
+    var memCap = clampInt(opts.memtableCap, 1, 8, 2);
+    var l0Threshold = clampInt(opts.l0Threshold, 1, 8, 2);
+    var wantAmp = truthy(opts.showAmplification, true);
+
+    var rawOps = isArr(opts.ops) ? opts.ops : [];
+    var ops = [];
+    for (var i = 0; i < rawOps.length && ops.length < MAX_OPS; i++) {
+      var o = rawOps[i];
+      if (!isArr(o) || o.length < 3) continue;
+      var k = parseInt(o[1], 10);
+      if (isFinite(k)) ops.push(['put', k, String(o[2])]);
+    }
+    if (!ops.length) ops = [['put', 1, 'a'], ['put', 2, 'b']];
+
+    var title = 'LSM Tree — 다시 읽고 다시 쓰기가 쓰기 증폭의 실체다';
+    if (isArr(opts.ops) && opts.ops.length > ops.length) title += '  ·  연산이 많아 앞 ' + ops.length + '개만 재생';
+
+    var data = run(memCap, l0Threshold, ops);
+    var ui = K.frame(host, { title: title });
+
+    (function legend() {
+      var T = K.tokens(ui.stage);
+      var items = [['memtable', T.wStart], ['L0 조각', T.wFrontier], ['L1(컴팩션됨)', T.accent], ['컴팩션 중', T.boxDanger]];
+      var el = K.el('div', 'wk-legend');
+      items.forEach(function (it) {
+        var sp = K.el('span'), ic = K.el('i');
+        ic.style.background = it[1];
+        sp.appendChild(ic); sp.appendChild(document.createTextNode(it[0]));
+        el.appendChild(sp);
+      });
+      ui.slot.appendChild(el);
+      K.onThemeChange(function () {
+        var T2 = K.tokens(ui.stage);
+        var cs = [T2.wStart, T2.wFrontier, T2.accent, T2.boxDanger];
+        Array.prototype.forEach.call(el.querySelectorAll('i'), function (n, k2) { n.style.background = cs[k2]; });
+      });
+    })();
+
+    var PAD = 12, ROW_H = 30;
+
+    function tableBox(ctx, T, x, y, w, entries, opts2) {
+      var h = ROW_H;
+      rrect(ctx, x, y, w, h, 4);
+      ctx.fillStyle = opts2.fill; ctx.fill();
+      ctx.strokeStyle = opts2.stroke || T.border; ctx.lineWidth = opts2.thick ? 2 : 1; ctx.stroke();
+      ctx.fillStyle = opts2.text || T.fg;
+      ctx.font = (opts2.thick ? '600 ' : '') + '11px ' + MONO;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      var label = opts2.label ? opts2.label + ': ' : '';
+      var body = entries.map(function (e) { return e.k + '=' + e.v; }).join(', ');
+      ctx.fillText(label + '[' + body + ']', x + w / 2, y + h / 2);
+    }
+
+    function layout(w) {
+      var inner = Math.max(240, w - PAD * 2);
+      return { inner: inner, x0: PAD, rowW: inner, height: PAD + ROW_H * 4 + 20 + (wantAmp ? 40 : 0) + PAD };
+    }
+
+    function draw(ctx, size, T) {
+      var l = layout(size.w);
+      var i = play ? play.index() : 0;
+      var st = data.steps[Math.min(i, data.steps.length - 1)];
+      var y = PAD;
+
+      // memtable
+      tableBox(ctx, T, l.x0, y, l.rowW, st.memtable, {
+        fill: T.bgElev, stroke: T.wStart, label: 'memtable',
+        thick: st.kind === 'put'
+      });
+      y += ROW_H + 8;
+
+      // L0
+      if (st.l0.length) {
+        var eachW = Math.min(180, (l.rowW - 8 * (st.l0.length - 1)) / st.l0.length);
+        var x = l.x0;
+        st.l0.forEach(function (t) {
+          var isCompacting = st.kind === 'compact' && st.compactedFrom && st.compactedFrom.indexOf(t.id) >= 0;
+          var justFlushed = st.kind === 'flush' && st.flushedId === t.id;
+          tableBox(ctx, T, x, y, eachW, t.entries, {
+            fill: T.bgElev, stroke: isCompacting ? T.boxDanger : T.wFrontier,
+            label: 'T' + t.id, thick: isCompacting || justFlushed
+          });
+          x += eachW + 8;
+        });
+      } else {
+        ctx.font = '11px ' + FONT; ctx.fillStyle = T.fgFaint; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+        ctx.fillText('L0 비어 있음', l.x0 + 4, y + ROW_H / 2);
+      }
+      y += ROW_H + 8;
+
+      // L1
+      if (st.l1) {
+        var isBeingWritten = st.kind === 'compact' && st.mergedInto === st.l1.id;
+        tableBox(ctx, T, l.x0, y, l.rowW, st.l1.entries, {
+          fill: isBeingWritten ? T.accent : T.bgElev, stroke: T.accent,
+          text: isBeingWritten ? T.bg : T.fg, label: 'L1', thick: true
+        });
+      } else {
+        ctx.font = '11px ' + FONT; ctx.fillStyle = T.fgFaint; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+        ctx.fillText('L1 비어 있음', l.x0 + 4, y + ROW_H / 2);
+      }
+      y += ROW_H + 16;
+
+      if (wantAmp) {
+        var amp = st.diskWrites > 0 && st.logicalWrites > 0 ? (st.diskWrites / st.logicalWrites) : 1;
+        ctx.save();
+        ctx.font = '11px ' + FONT; ctx.fillStyle = T.fgFaint; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+        var items = [
+          ['논리 쓰기', st.logicalWrites, T.fg],
+          ['디스크 쓰기', st.diskWrites, T.fg],
+          ['증폭', amp.toFixed(2) + '×', amp > 1 ? T.boxDanger : T.fgFaint]
+        ];
+        var x2 = l.x0;
+        items.forEach(function (it) {
+          ctx.font = '11px ' + FONT; ctx.fillStyle = T.fgFaint;
+          ctx.fillText(it[0], x2, y);
+          var lw = ctx.measureText(it[0]).width;
+          ctx.font = '600 14px ' + MONO; ctx.fillStyle = it[2];
+          ctx.fillText(String(it[1]), x2 + lw + 6, y);
+          x2 += lw + 6 + ctx.measureText(String(it[1])).width + 24;
+        });
+        ctx.restore();
+      }
+    }
+
+    var cv = K.canvas(ui.stage, { height: function (w) { return layout(w).height; }, draw: draw });
+    var play = K.player(ui, {
+      total: function () { return data.steps.length; },
+      render: function () { cv.redraw(); },
+      label: function (i) { return data.steps[Math.min(i, data.steps.length - 1)].note || ''; }
+    });
+    play.draw();
+
+    host.__widget = {
+      logicalWrites: function () { return data.logicalWrites; },
+      diskWrites: function () { return data.diskWrites; },
+      amplification: function () { return data.diskWrites / data.logicalWrites; },
+      steps: function () { return data.steps.length; },
+      goto: function (i) { play.goto(i); },
+      finalL1: function () { var s = data.steps[data.steps.length - 1]; return s.l1 ? s.l1.entries.map(function (e) { return [e.k, e.v]; }) : []; }
+    };
+  });
+})();
+
 /* ==== multi-agv-conflict.js ==== */
 /* multi-agv-conflict.js — 여러 대가 같은 통로를 쓸 때 무엇이 무너지는가
  *
@@ -11449,6 +12528,234 @@ window.Widgets = window.Widgets || {};
       setCapacity: function (v) { cap = clampInt(v, CAP_MIN, CAP_MAX, cap); rebuild(); play.goto(0); },
       goto: function (i) { play.goto(i); },
       index: function () { return play.index(); }
+    };
+  });
+})();
+
+/* ==== skiplist.js ==== */
+/* skiplist.js — 고속도로와 국도, 위층은 성기고 한 걸음에 멀리 간다
+ *
+ * 이 위젯이 가르치려는 단 하나:
+ *   **균형을 계산이 아니라 동전 던지기로 맞춘다.** 회전이 없다 — 삽입은
+ *   그 값이 몇 층까지 올라가는지 동전으로 정한 뒤, 그 층까지 포인터
+ *   두 개씩만 잇는 것으로 끝난다. 탐색은 맨 위층에서 시작해 다음 노드가
+ *   찾는 값보다 크거나 없으면 한 층 내려온다.
+ *
+ * 왜 탑(세로 막대) 그림인가
+ *   각 키가 몇 층까지 올라갔는지가 이 구조 전체다. 층마다 원소가 절반씩
+ *   줄어드는 것이 눈으로 보여야 "왜 위층이 고속도로인가"가 손에 잡힌다.
+ *   탐색 경로는 위층에서 시작해 계단식으로 내려오는 꺾은선으로 그린다 —
+ *   그 모양 자체가 O(log n) 의 근거다.
+ *
+ * ── opts (챕터가 넘기는 것) ──────────────────────────────────────────────
+ *   levels : 최대 층수 (기본 4, 0층 포함)
+ *   p      : 문서화용(현재 계산은 xorshift 1비트 = p=0.5 고정)
+ *   keys   : 삽입할 키 배열(오름차순 여부 무관, 삽입 순서대로 넣는다)
+ *   query  : 탐색할 키
+ *   seed   : xorshift32 시드. 본문 dual 코드와 정확히 같은 RNG 로 레벨을
+ *            뽑는다 — 그래야 본문이 손추적한 결과와 위젯이 일치한다.
+ *   show   : ["towers","searchPath","hopCounter"] 중 원하는 것. 기본 전부
+ */
+(function () {
+  'use strict';
+  var K = window.WidgetKit;
+  if (!K) return;
+
+  var FONT = '-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif';
+  var MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace';
+  var MASK32 = 0xFFFFFFFF;
+
+  function isArr(v) { return !!v && typeof v === 'object' && typeof v.length === 'number' && typeof v !== 'string'; }
+  function clampInt(v, lo, hi, d) { var n = parseInt(v, 10); if (!isFinite(n)) return d; return Math.max(lo, Math.min(hi, n)); }
+
+  // 본문 dual 코드와 동일한 xorshift32 — 재현성을 위한 장치(챕터 §4 주석과 같은 이유).
+  function makeXorshift(seed) {
+    var state = seed >>> 0;
+    return function bit() {
+      var x = state;
+      x = (x ^ (x << 13)) & MASK32;
+      x = (x ^ (x >>> 17)) & MASK32;
+      x = (x ^ (x << 5)) & MASK32;
+      state = x >>> 0;
+      return state & 1;
+    };
+  }
+
+  function run(maxLevel, keys, query, seed) {
+    var bit = makeXorshift(seed >>> 0);
+    function randomLevel() {
+      var lv = 0;
+      while (lv < maxLevel && bit() === 1) lv++;
+      return lv;
+    }
+
+    // 리스트: levels[l] = 정렬된 키 배열(그 층에 존재하는 키만).
+    var levelArr = [];
+    for (var i = 0; i <= maxLevel; i++) levelArr.push([]);
+    var keyLevel = {};   // key -> 도달 레벨
+
+    var steps = [];
+    function snap(kind, note, extra) {
+      var s = { kind: kind, levels: levelArr.map(function (a) { return a.slice(); }), note: note };
+      if (extra) for (var k in extra) s[k] = extra[k];
+      steps.push(s);
+    }
+    snap('init', '빈 스킵 리스트. 최대 ' + maxLevel + '층(0층 포함), 동전 앞면 확률 1/2.');
+
+    keys.forEach(function (key) {
+      var lv = randomLevel();
+      keyLevel[key] = lv;
+      for (var l = 0; l <= lv; l++) {
+        var arr = levelArr[l];
+        var pos = 0;
+        while (pos < arr.length && arr[pos] < key) pos++;
+        arr.splice(pos, 0, key);
+      }
+      snap('insert', key + ' 삽입 — 동전이 레벨 ' + lv + '까지 올렸다. 0층부터 ' + lv + '층까지 끼워 넣는다.', { key: key, level: lv });
+    });
+
+    // 탐색: 맨 위층에서 시작, 오른쪽으로 갈 수 있으면 가고 아니면 한 층 내려온다.
+    var path = [];   // [{level, at}] — at 은 그 층에서 멈춘 위치의 키(또는 null=시작)
+    var cur = null;
+    var found = false;
+    for (var l = maxLevel; l >= 0; l--) {
+      var arr = levelArr[l];
+      var idx = 0;
+      // cur 보다 큰 것부터 시작 지점을 잡는다.
+      while (idx < arr.length && arr[idx] <= (cur == null ? -Infinity : cur)) idx++;
+      while (idx < arr.length && arr[idx] < query) { cur = arr[idx]; path.push({ level: l, at: cur, hop: true }); idx++; }
+      path.push({ level: l, at: cur, hop: false, dropDown: l > 0 });
+      if (idx < arr.length && arr[idx] === query) { found = true; cur = query; path.push({ level: l, at: query, hop: true, matched: true }); break; }
+    }
+
+    snap('search-init', 'query(' + query + ') — 맨 위층(' + maxLevel + '층)에서 시작.', { path: [], query: query });
+    var acc = [];
+    path.forEach(function (p) {
+      acc = acc.concat([p]);
+      var msg;
+      if (p.matched) msg = query + ' 발견 — ' + p.level + '층에서 일치.';
+      else if (p.hop) msg = p.level + '층에서 ' + p.at + '로 이동 (다음이 ' + query + '보다 작거나 같다).';
+      else msg = p.level + '층에서 더 못 간다 — 한 층 내려온다.';
+      snap('search', msg, { path: acc.slice(), query: query });
+    });
+    snap('done', 'query(' + query + ') 결과: ' + (found ? '존재함' : '없음') + '. 홉 수 ' + path.filter(function (p) { return p.hop; }).length + '.',
+      { path: acc.slice(), query: query, found: found });
+
+    return { steps: steps, keyLevel: keyLevel, found: found, hops: path.filter(function (p) { return p.hop; }).length };
+  }
+
+  K.register('skiplist', function (host, opts) {
+    var maxLevel = clampInt(opts.levels, 1, 8, 4);
+    var keys = isArr(opts.keys) ? opts.keys.map(Number).filter(isFinite).slice(0, 30) : [3, 6, 7, 9, 12];
+    var query = isFinite(Number(opts.query)) ? Number(opts.query) : keys[Math.floor(keys.length / 2)];
+    var seed = (typeof opts.seed === 'number' && isFinite(opts.seed)) ? (opts.seed >>> 0) : 88172645463325252;
+    if (!(typeof opts.seed === 'number')) {
+      // 시드가 32비트를 넘는 정수(예: 본문의 88172645463325252)로 넘어오면 하위 32비트만 쓴다.
+      seed = Number(BigInt(Math.trunc(opts.seed || 88172645463325252)) & 0xFFFFFFFFn);
+    }
+
+    var data = run(maxLevel, keys, query, seed);
+    var ui = K.frame(host, { title: '스킵 리스트 — 고속도로와 국도, 위층은 성기고 한 걸음에 멀리 간다' });
+
+    (function legend() {
+      var T = K.tokens(ui.stage);
+      var items = [['노드', T.wFrontier], ['방금 삽입', T.accent], ['탐색 경로', T.wPath], ['찾음', T.wGoal]];
+      var el = K.el('div', 'wk-legend');
+      items.forEach(function (it) {
+        var sp = K.el('span'), ic = K.el('i');
+        ic.style.background = it[1];
+        sp.appendChild(ic); sp.appendChild(document.createTextNode(it[0]));
+        el.appendChild(sp);
+      });
+      ui.slot.appendChild(el);
+      K.onThemeChange(function () {
+        var T2 = K.tokens(ui.stage);
+        var cs = [T2.wFrontier, T2.accent, T2.wPath, T2.wGoal];
+        Array.prototype.forEach.call(el.querySelectorAll('i'), function (n, k) { n.style.background = cs[k]; });
+      });
+    })();
+
+    var PAD = 12, ROW_H = 30;
+    var allKeys = keys.slice().sort(function (a, b) { return a - b; });
+
+    function layout(w) {
+      var inner = Math.max(240, w - PAD * 2);
+      var cellW = Math.max(30, Math.min(56, inner / Math.max(1, allKeys.length)));
+      return { inner: inner, cellW: cellW, x0: PAD, height: PAD + (maxLevel + 1) * ROW_H + 40 + PAD };
+    }
+
+    function draw(ctx, size, T) {
+      var l = layout(size.w);
+      var i = play ? play.index() : 0;
+      var st = data.steps[Math.min(i, data.steps.length - 1)];
+      var pathSet = {};
+      (st.path || []).forEach(function (p) { pathSet[p.level + ':' + p.at] = p.matched ? 'match' : 'path'; });
+
+      ctx.save();
+      for (var lv = maxLevel; lv >= 0; lv--) {
+        var y = PAD + (maxLevel - lv) * ROW_H + 14;
+        ctx.font = '10px ' + MONO; ctx.fillStyle = T.fgFaint;
+        ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+        ctx.fillText(lv + '층', l.x0 - 4 + 24, y);
+
+        var arr = st.levels[lv];
+        // 가로선(그 층의 연결)
+        ctx.strokeStyle = T.border; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(l.x0 + 26, y); ctx.lineTo(l.x0 + 26 + allKeys.length * l.cellW, y); ctx.stroke();
+
+        allKeys.forEach(function (k, ki) {
+          if (arr.indexOf(k) < 0) return;
+          var x = l.x0 + 26 + ki * l.cellW + l.cellW / 2;
+          var isNew = st.kind === 'insert' && st.key === k && lv <= st.level;
+          var pk = pathSet[lv + ':' + k];
+          var fill = T.wFrontier, r = 5;
+          if (isNew) fill = T.accent;
+          if (pk === 'path') fill = T.wPath;
+          if (pk === 'match') { fill = T.wGoal; r = 7; }
+          ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
+          ctx.fillStyle = fill; ctx.fill();
+          if (lv === 0) {
+            ctx.font = '10px ' + MONO; ctx.fillStyle = T.fgDim;
+            ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+            ctx.fillText(String(k), x, y + 10);
+          }
+        });
+      }
+      ctx.restore();
+
+      var yEnd = PAD + (maxLevel + 1) * ROW_H + 14;
+      ctx.save();
+      ctx.font = '11px ' + FONT; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+      ctx.fillStyle = st.kind === 'done' ? (st.found ? T.wPath : T.boxDanger) : T.fgDim;
+      var lines = wrapText(ctx, st.note, size.w - PAD * 2);
+      lines.forEach(function (t, idx) { ctx.fillText(t, l.x0, yEnd + idx * 15); });
+      ctx.restore();
+    }
+
+    function wrapText(ctx, text, maxW) {
+      var words = text.split(' '), lines = [], cur = '';
+      for (var i = 0; i < words.length; i++) {
+        var t = cur ? cur + ' ' + words[i] : words[i];
+        if (ctx.measureText(t).width > maxW && cur) { lines.push(cur); cur = words[i]; } else cur = t;
+      }
+      if (cur) lines.push(cur);
+      return lines;
+    }
+
+    var cv = K.canvas(ui.stage, { height: function (w) { return layout(w).height; }, draw: draw });
+    var play = K.player(ui, {
+      total: function () { return data.steps.length; },
+      render: function () { cv.redraw(); },
+      label: function (i) { return data.steps[Math.min(i, data.steps.length - 1)].note || ''; }
+    });
+    play.draw();
+
+    host.__widget = {
+      keyLevel: function () { return Object.assign({}, data.keyLevel); },
+      found: function () { return data.found; },
+      hops: function () { return data.hops; },
+      steps: function () { return data.steps.length; },
+      goto: function (i) { play.goto(i); }
     };
   });
 })();
