@@ -475,6 +475,7 @@
 
     if (!id) { renderHome(); return; }
     if (id === 'glossary') { renderGlossary(); return; }
+    if (id === 'problems') { renderProblems(); return; }
 
     var meta = CH[id];
     if (!meta) {
@@ -629,6 +630,93 @@
     }
 
     input.addEventListener('input', apply);
+    apply();
+    window.scrollTo(0, 0);
+  }
+
+  /**
+   * 문제 색인(§7·§8). `::: quiz` 에서 뽑힌 대표문제를 Part 단위로 묶어 보여준다.
+   * `::: classify` 가 지문→알고리즘 방향의 훈련이라면, 이 페이지는 반대 방향
+   * (챕터→대표문제)의 색인이다 — 이미 배운 유형의 문제를 찾아 풀 때 쓴다.
+   */
+  function renderProblems() {
+    var items = BOOK.problems || [];
+    var doc = $('#doc');
+
+    // Part 등장 순서를 그대로 유지한다(toc.json 순서 = 이 책의 계보 순서).
+    var order = [];
+    var groups = {};
+    items.forEach(function (it) {
+      if (!groups[it.partNum]) { groups[it.partNum] = { title: it.partTitle, items: [] }; order.push(it.partNum); }
+      groups[it.partNum].items.push(it);
+    });
+
+    var html = '<div class="problems">';
+    html += '<h1>문제 색인</h1>';
+    html += '<p class="problems-lead">' + items.length + '개. 각 챕터의 <b>::: quiz</b>에 실린 대표문제를 ' +
+            'Part 순서대로 모았다. 정답 코드는 싣지 않는다(A-10) — 문제를 찾으면 그 챕터로 가서 ' +
+            '사고과정을 읽는다.</p>';
+    html += '<div class="problems-controls">';
+    html += '<input id="problems-filter" type="search" placeholder="제목·번호·챕터로 거르기" ' +
+            'aria-label="문제 거르기" autocomplete="off">';
+    html += '<select id="problems-tier" aria-label="난도 등급">';
+    ['전체', '브론즈', '실버', '골드', '플래티넘'].forEach(function (t) {
+      html += '<option value="' + (t === '전체' ? '' : t) + '">' + t + '</option>';
+    });
+    html += '</select></div>';
+    html += '<p id="problems-count" class="problems-count" role="status" aria-live="polite"></p>';
+    html += '<div id="problems-list" class="problems-list">';
+    order.forEach(function (partNum) {
+      var g = groups[partNum];
+      html += '<div class="problems-group" data-part="' + escapeHtml(partNum) + '">';
+      html += '<div class="problems-group-title">' + escapeHtml(partNum) + ' — ' + escapeHtml(g.title) + '</div>';
+      g.items.forEach(function (it, i) {
+        html += '<div class="problems-item" data-gi="' + i + '">';
+        html += '<span class="problems-id">' + escapeHtml(it.id) + '</span>';
+        html += '<span class="problems-title"><a href="' + escapeHtml(it.url) + '" target="_blank" rel="noopener">' +
+                escapeHtml(it.title) + '</a></span>';
+        html += '<span class="problems-diff">' + escapeHtml(it.diff) + '</span>';
+        html += '<a class="problems-ch" href="#/' + escapeHtml(it.chapter) + '">' + escapeHtml(it.num) + '</a>';
+        html += '</div>';
+      });
+      html += '</div>';
+    });
+    html += '</div></div>';
+
+    doc.innerHTML = html;
+    $('#inbook').innerHTML = '';
+    renderPager(null);
+    highlightCurrentToc('');
+    document.title = '문제 색인 · ' + ((BOOK.meta || {}).title || 'Algorithmic');
+
+    var input = $('#problems-filter');
+    var tierSel = $('#problems-tier');
+    var groupNodes = doc.querySelectorAll('.problems-group');
+    var count = $('#problems-count');
+
+    function apply() {
+      var q = (input.value || '').trim().toLowerCase();
+      var tier = tierSel.value;
+      var shown = 0;
+      groupNodes.forEach(function (gEl) {
+        var partNum = gEl.getAttribute('data-part');
+        var list = groups[partNum].items;
+        var itemNodes = gEl.querySelectorAll('.problems-item');
+        var groupShown = 0;
+        itemNodes.forEach(function (node, i) {
+          var it = list[i];
+          var hay = (it.title + ' ' + it.id + ' ' + it.chTitle + ' ' + it.num).toLowerCase();
+          var hit = (!q || hay.indexOf(q) >= 0) && (!tier || it.tier === tier);
+          node.hidden = !hit;
+          if (hit) { groupShown++; shown++; }
+        });
+        gEl.hidden = groupShown === 0;
+      });
+      count.textContent = (q || tier) ? shown + ' / ' + items.length : '';
+    }
+
+    input.addEventListener('input', apply);
+    tierSel.addEventListener('change', apply);
     apply();
     window.scrollTo(0, 0);
   }
