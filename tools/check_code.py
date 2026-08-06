@@ -243,14 +243,17 @@ def main() -> int:
                 if found:
                     cline, shown = found
                     # 언어 차이가 선언된 블록은 언어별 console 블록을 둘 두는 것이 정상이다.
-                    # 어느 한쪽과도 안 맞을 때만 지면이 낡은 것이다.
-                    missing = min((console_mismatches(a, shown) for a in cands), key=len)
+                    # 어느 한쪽과도 안 맞을 때만 지면이 낡은 것이다. 더 적게 어긋난 후보를
+                    # "실제 출력"으로 보여준다 — 어느 쪽과 비교했는지 독자가 알 수 있어야 한다.
+                    best_actual, missing = min(
+                        ((a, console_mismatches(a, shown)) for a in cands), key=lambda p: len(p[1])
+                    )
                     if missing:
                         stale += 1
                         print(f"{rel}:{cline}: 본문 console 블록에 실제 출력에 없는 줄이 있다")
                         for m in missing[:4]:
                             print("    실린 것: " + m[:150])
-                        print("    실제   : " + actual.replace("\n", " / ")[:200])
+                        print("    실제   : " + best_actual.replace("\n", " / ")[:200])
 
     print(
         f"\n::: dual {total}개 · 실행 {ran}회 · 실패 {failed} · "
