@@ -12532,6 +12532,305 @@ window.Widgets = window.Widgets || {};
   });
 })();
 
+/* ==== segment-tree.js ==== */
+/* segment-tree.js — 구간 하나가 O(log n)개의 완결된 조각으로 갈라진다
+ *
+ * 이 위젯이 가르치려는 단 하나:
+ *   임의의 구간 질의는 트리를 전부 훑지 않는다. **그 구간을 정확히 덮는
+ *   O(log n)개의 노드로 쪼개고, 그 노드들만 합친다.** 어느 노드가 "완전히
+ *   덮여서 더 안 내려가도 되는가"를 판정하는 것이 이 알고리즘의 전부다.
+ *
+ * 왜 lazy 플래그를 노드 위에 직접 찍는가
+ *   구간 갱신을 매번 리프까지 내려가며 적용하면 O(n)이 된다. lazy
+ *   propagation은 "이 노드 아래는 전부 갱신됐지만 아직 안 내려보냈다"는
+ *   빚을 노드에 남겨 두고 필요할 때만 자식에게 미룬다. 그 빚이 있는
+ *   노드를 색으로 표시해야 "왜 다음 질의가 그 빚을 먼저 갚는가"가 보인다.
+ *
+ * ── opts (챕터가 넘기는 것. 이 주석이 명세다) ────────────────────────────────
+ *   array : 초기 배열 (기본 [5,2,8,1,9,3,7,4])
+ *   op    : "sum"(기본) | "min" | "max"
+ *   ops   : [["query",l,r] | ["update",idx,val] | ["rangeUpdate",l,r,delta], ...]
+ *           인덱스는 0-based, r은 포함(inclusive).
+ *   lazy  : true(기본) — rangeUpdate 를 lazy propagation 으로 처리
+ *   show  : ["tree","decomposition","lazyFlags"] 중 원하는 것. 기본 전부
+ */
+(function () {
+  'use strict';
+  var K = window.WidgetKit;
+  if (!K) return;
+
+  var FONT = '-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif';
+  var MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace';
+  var MAX_N = 16, MAX_OPS = 30;
+
+  function isArr(v) { return !!v && typeof v === 'object' && typeof v.length === 'number' && typeof v !== 'string'; }
+  function clampInt(v, lo, hi, d) { var n = parseInt(v, 10); if (!isFinite(n)) return d; return Math.max(lo, Math.min(hi, n)); }
+  function truthy(v, d) { return v === undefined || v === null ? d : !!v; }
+  function rrect(ctx, x, y, w, h, r) {
+    r = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+  }
+
+  var OPS = {
+    sum: { combine: function (a, b) { return a + b; }, identity: 0, applyDelta: function (v, d, len) { return v + d * len; } },
+    min: { combine: Math.min, identity: Infinity, applyDelta: function (v, d) { return v + d; } },
+    max: { combine: Math.max, identity: -Infinity, applyDelta: function (v, d) { return v + d; } }
+  };
+
+  /* 배열 기반 세그먼트 트리. node 1이 뿌리, node*2/node*2+1 이 자식.
+   * 각 노드는 [lo,hi] 구간을 덮는다. lazy[node] 는 "아래로 아직 안 내려보낸 델타". */
+  function SegTree(arr, opName) {
+    this.n = arr.length;
+    this.op = OPS[opName];
+    var size = 1; while (size < this.n) size *= 2; size *= 4;
+    this.tree = new Array(size).fill(this.op.identity);
+    this.lazy = new Array(size).fill(0);
+    this.lo = new Array(size).fill(0);
+    this.hi = new Array(size).fill(0);
+    this.build(1, 0, this.n - 1, arr);
+  }
+  SegTree.prototype.build = function (node, lo, hi, arr) {
+    this.lo[node] = lo; this.hi[node] = hi;
+    if (lo === hi) { this.tree[node] = arr[lo]; return; }
+    var mid = (lo + hi) >> 1;
+    this.build(node * 2, lo, mid, arr);
+    this.build(node * 2 + 1, mid + 1, hi, arr);
+    this.tree[node] = this.op.combine(this.tree[node * 2], this.tree[node * 2 + 1]);
+  };
+  SegTree.prototype.push = function (node) {
+    if (this.lazy[node] === 0) return;
+    var self = this;
+    [node * 2, node * 2 + 1].forEach(function (c) {
+      self.tree[c] = self.op.applyDelta(self.tree[c], self.lazy[node], self.hi[c] - self.lo[c] + 1);
+      self.lazy[c] += self.lazy[node];
+    });
+    this.lazy[node] = 0;
+  };
+
+  function buildSnap(steps, tree, kind, note, extra) {
+    var s = {
+      kind: kind, note: note,
+      values: tree.tree.slice(0, tree.n * 4 + 4),
+      lazy: tree.lazy.slice(0, tree.n * 4 + 4)
+    };
+    if (extra) for (var k in extra) s[k] = extra[k];
+    steps.push(s);
+  }
+
+  function run(arr, opName, ops, useLazy) {
+    var tree = new SegTree(arr, opName);
+    var steps = [];
+    buildSnap(steps, tree, 'init', '배열 [' + arr.join(', ') + ']로 트리를 만든다. 연산: ' + opName + '.');
+
+    function queryVisit(node, l, r, visited) {
+      if (tree.hi[node] < l || r < tree.lo[node]) { return tree.op.identity; }
+      if (l <= tree.lo[node] && tree.hi[node] <= r) { visited.push({ node: node, full: true }); return tree.tree[node]; }
+      if (useLazy) tree.push(node);
+      visited.push({ node: node, full: false });
+      return tree.op.combine(queryVisit(node * 2, l, r, visited), queryVisit(node * 2 + 1, l, r, visited));
+    }
+
+    function pointUpdate(node, idx, val) {
+      if (tree.lo[node] === tree.hi[node]) { tree.tree[node] = val; return; }
+      if (useLazy) tree.push(node);
+      var mid = (tree.lo[node] + tree.hi[node]) >> 1;
+      if (idx <= mid) pointUpdate(node * 2, idx, val); else pointUpdate(node * 2 + 1, idx, val);
+      tree.tree[node] = tree.op.combine(tree.tree[node * 2], tree.tree[node * 2 + 1]);
+    }
+
+    function rangeUpdate(node, l, r, delta, visited) {
+      if (tree.hi[node] < l || r < tree.lo[node]) return;
+      if (l <= tree.lo[node] && tree.hi[node] <= r) {
+        tree.tree[node] = tree.op.applyDelta(tree.tree[node], delta, tree.hi[node] - tree.lo[node] + 1);
+        tree.lazy[node] += delta;
+        visited.push({ node: node, full: true });
+        return;
+      }
+      tree.push(node);
+      visited.push({ node: node, full: false });
+      var mid = (tree.lo[node] + tree.hi[node]) >> 1;
+      rangeUpdate(node * 2, l, r, delta, visited);
+      rangeUpdate(node * 2 + 1, l, r, delta, visited);
+      tree.tree[node] = tree.op.combine(tree.tree[node * 2], tree.tree[node * 2 + 1]);
+    }
+
+    ops.forEach(function (op) {
+      if (op[0] === 'query') {
+        var l = op[1], r = op[2], visited = [];
+        var result = queryVisit(1, l, r, visited);
+        var fullNodes = visited.filter(function (v) { return v.full; });
+        buildSnap(steps, tree, 'query',
+          'query(' + l + ', ' + r + ') = ' + result + ' — 완전히 덮인 노드 ' + fullNodes.length + '개로 분해됐다: ' +
+          fullNodes.map(function (v) { return '[' + tree.lo[v.node] + ',' + tree.hi[v.node] + ']'; }).join(', ') + '.',
+          { visited: visited, result: result, l: l, r: r });
+      } else if (op[0] === 'update') {
+        var idx = op[1], val = op[2];
+        pointUpdate(1, idx, val);
+        buildSnap(steps, tree, 'update', 'update(' + idx + ', ' + val + ') — 리프까지 내려가 고치고 조상들을 다시 합친다.', { idx: idx, val: val });
+      } else if (op[0] === 'rangeUpdate') {
+        var rl = op[1], rr = op[2], delta = op[3], vis2 = [];
+        rangeUpdate(1, rl, rr, delta, vis2);
+        var fulls = vis2.filter(function (v) { return v.full; });
+        buildSnap(steps, tree, 'rangeUpdate',
+          'rangeUpdate([' + rl + ',' + rr + '], +' + delta + ') — 완전히 덮인 노드 ' + fulls.length +
+          '개만 갱신하고 빚을 lazy 에 남긴다. 자식은 아직 안 바뀌었다.',
+          { visited: vis2, l: rl, r: rr });
+      }
+    });
+
+    return { steps: steps, tree: tree };
+  }
+
+  K.register('segment-tree', function (host, opts) {
+    var arr = isArr(opts.array) ? opts.array.map(Number).filter(isFinite).slice(0, MAX_N) : [5, 2, 8, 1, 9, 3, 7, 4];
+    if (!arr.length) arr = [5, 2, 8, 1, 9, 3, 7, 4];
+    var opName = OPS[opts.op] ? opts.op : 'sum';
+    var useLazy = truthy(opts.lazy, true);
+    var show = isArr(opts.show) ? opts.show.map(String) : ['tree', 'decomposition', 'lazyFlags'];
+    var has = function (x) { return show.indexOf(x) >= 0; };
+
+    var rawOps = isArr(opts.ops) ? opts.ops : [];
+    var ops = [];
+    for (var i = 0; i < rawOps.length && ops.length < MAX_OPS; i++) {
+      var o = rawOps[i];
+      if (!isArr(o) || !o.length) continue;
+      if (o[0] === 'query' && o.length >= 3) ops.push(['query', clampInt(o[1], 0, arr.length - 1, 0), clampInt(o[2], 0, arr.length - 1, arr.length - 1)]);
+      else if (o[0] === 'update' && o.length >= 3) ops.push(['update', clampInt(o[1], 0, arr.length - 1, 0), Number(o[2]) || 0]);
+      else if (o[0] === 'rangeUpdate' && o.length >= 4) ops.push(['rangeUpdate', clampInt(o[1], 0, arr.length - 1, 0), clampInt(o[2], 0, arr.length - 1, arr.length - 1), Number(o[3]) || 0]);
+    }
+    if (!ops.length) ops = [['query', 1, 5], ['rangeUpdate', 2, 6, 10], ['query', 1, 5]];
+
+    var data = run(arr, opName, ops, useLazy);
+    var ui = K.frame(host, { title: '세그먼트 트리 — 구간이 O(log n)개의 완결된 조각으로 갈라진다' });
+
+    (function legend() {
+      var T = K.tokens(ui.stage);
+      var items = [['완전히 덮임', T.wPath], ['더 내려감', T.wFrontier], ['lazy 빚 있음', T.accent], ['범위 밖', T.bgElev]];
+      var el = K.el('div', 'wk-legend');
+      items.forEach(function (it) {
+        var sp = K.el('span'), ic = K.el('i');
+        ic.style.background = it[1];
+        sp.appendChild(ic); sp.appendChild(document.createTextNode(it[0]));
+        el.appendChild(sp);
+      });
+      ui.slot.appendChild(el);
+      K.onThemeChange(function () {
+        var T2 = K.tokens(ui.stage);
+        var cs = [T2.wPath, T2.wFrontier, T2.accent, T2.bgElev];
+        Array.prototype.forEach.call(el.querySelectorAll('i'), function (nn, k) { nn.style.background = cs[k]; });
+      });
+    })();
+
+    var PAD = 12, NODE_W_MIN = 30, LEVEL_H = 52;
+    var depthMax = Math.ceil(Math.log2(Math.max(2, arr.length))) + 1;
+
+    // 트리 노드 나열(뿌리=1) — build 와 같은 순서.
+    var nodeList = [];
+    (function collect(node, lo, hi, depth) {
+      nodeList.push({ node: node, lo: lo, hi: hi, depth: depth });
+      if (lo === hi) return;
+      var mid = (lo + hi) >> 1;
+      collect(node * 2, lo, mid, depth + 1);
+      collect(node * 2 + 1, mid + 1, hi, depth + 1);
+    })(1, 0, arr.length - 1, 0);
+
+    function layout(w) {
+      var leafCount = nodeList.filter(function (nd) { return nd.lo === nd.hi; }).length;
+      var cellW = Math.max(NODE_W_MIN, Math.min(60, (w - PAD * 2) / Math.max(1, leafCount)));
+      return { cellW: cellW, leafCount: leafCount, height: PAD + depthMax * LEVEL_H + 44 + PAD };
+    }
+
+    function draw(ctx, size, T) {
+      var l = layout(size.w);
+      var i = play ? play.index() : 0;
+      var st = data.steps[Math.min(i, data.steps.length - 1)];
+
+      var visitedMap = {};
+      (st.visited || []).forEach(function (v) { visitedMap[v.node] = v.full ? 'full' : 'partial'; });
+
+      // 리프의 x 좌표를 기준으로 내부 노드는 자식 중앙에 둔다.
+      var leafX = 0;
+      var pos = {};
+      (function assign(nd) {
+        var kids = nodeList.filter(function (o) { return o.lo >= nd.lo && o.hi <= nd.hi && o.depth === nd.depth + 1 && (o.node === nd.node * 2 || o.node === nd.node * 2 + 1); });
+        if (nd.lo === nd.hi) { pos[nd.node] = { x: PAD + leafX * l.cellW + l.cellW / 2, y: PAD + nd.depth * LEVEL_H + 16 }; leafX++; return; }
+        kids.forEach(assign);
+        var xs = kids.map(function (k) { return pos[k.node].x; });
+        pos[nd.node] = { x: (Math.min.apply(null, xs) + Math.max.apply(null, xs)) / 2, y: PAD + nd.depth * LEVEL_H + 16 };
+      })(nodeList[0]);
+
+      ctx.save();
+      // 간선
+      nodeList.forEach(function (nd) {
+        if (nd.lo === nd.hi) return;
+        [nd.node * 2, nd.node * 2 + 1].forEach(function (c) {
+          if (!pos[c]) return;
+          ctx.strokeStyle = T.border; ctx.lineWidth = 1;
+          ctx.beginPath(); ctx.moveTo(pos[nd.node].x, pos[nd.node].y + 12); ctx.lineTo(pos[c].x, pos[c].y - 12); ctx.stroke();
+        });
+      });
+      // 노드
+      nodeList.forEach(function (nd) {
+        var p = pos[nd.node];
+        var w = Math.max(28, l.cellW * (nd.hi - nd.lo + 1) * 0.5);
+        var vk = visitedMap[nd.node];
+        var hasLazy = has('lazyFlags') && st.lazy && st.lazy[nd.node];
+        var fill = T.bgElev, stroke = T.border, txt = T.fg;
+        if (vk === 'full') { fill = T.wPath; txt = T.bg; stroke = T.wPath; }
+        else if (vk === 'partial') { fill = T.wFrontier; stroke = T.wFrontier; }
+        if (hasLazy) { stroke = T.accent; }
+        rrect(ctx, p.x - w / 2, p.y - 12, w, 24, 4);
+        ctx.fillStyle = fill; ctx.fill();
+        ctx.strokeStyle = stroke; ctx.lineWidth = (hasLazy || vk) ? 2 : 1; ctx.stroke();
+        ctx.fillStyle = txt; ctx.font = '600 10px ' + MONO;
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        var val = st.values && st.values[nd.node] != null && isFinite(st.values[nd.node]) ? st.values[nd.node] : '·';
+        ctx.fillText('[' + nd.lo + ',' + nd.hi + '] ' + val, p.x, p.y);
+        if (hasLazy) {
+          ctx.font = '9px ' + MONO; ctx.fillStyle = T.accent; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+          ctx.fillText('+' + st.lazy[nd.node], p.x, p.y + 14);
+        }
+      });
+      ctx.restore();
+
+      var yEnd = PAD + depthMax * LEVEL_H + 16;
+      ctx.save();
+      ctx.font = '11px ' + FONT; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+      ctx.fillStyle = st.kind === 'query' ? T.wPath : T.fgDim;
+      var lines = wrapText(ctx, st.note, size.w - PAD * 2);
+      lines.forEach(function (t, idx) { ctx.fillText(t, PAD, yEnd + idx * 15); });
+      ctx.restore();
+    }
+
+    function wrapText(ctx, text, maxW) {
+      var words = text.split(' '), lines = [], cur = '';
+      for (var i = 0; i < words.length; i++) {
+        var t = cur ? cur + ' ' + words[i] : words[i];
+        if (ctx.measureText(t).width > maxW && cur) { lines.push(cur); cur = words[i]; } else cur = t;
+      }
+      if (cur) lines.push(cur);
+      return lines;
+    }
+
+    var cv = K.canvas(ui.stage, { height: function (w) { return layout(w).height; }, draw: draw });
+    var play = K.player(ui, {
+      total: function () { return data.steps.length; },
+      render: function () { cv.redraw(); },
+      label: function (i) { return data.steps[Math.min(i, data.steps.length - 1)].note || ''; }
+    });
+    play.draw();
+
+    host.__widget = {
+      lastResult: function () { var s = data.steps[data.steps.length - 1]; return s.result; },
+      queryResults: function () { return data.steps.filter(function (s) { return s.kind === 'query'; }).map(function (s) { return s.result; }); },
+      steps: function () { return data.steps.length; },
+      goto: function (i) { play.goto(i); }
+    };
+  });
+})();
+
 /* ==== skiplist.js ==== */
 /* skiplist.js — 고속도로와 국도, 위층은 성기고 한 걸음에 멀리 간다
  *
@@ -17384,6 +17683,284 @@ window.Widgets = window.Widgets || {};
       },
       goto: function (i) { play.goto(i); },
       layout: function () { return L(); }
+    };
+  });
+})();
+
+/* ==== union-find.js ==== */
+/* union-find.js — 경로 압축이 한 번의 조회로 트리를 납작하게 만든다
+ *
+ * 이 위젯이 가르치려는 단 하나:
+ *   **경로 압축은 find 한 번이 지나간 모든 노드를 뿌리에 직접 매단다.**
+ *   압축 없는 union-find는 union이 계속되면 사슬처럼 깊어질 수 있지만,
+ *   경로 압축이 있으면 그 깊은 사슬을 find 한 번이 통째로 납작하게 편다.
+ *
+ * 왜 "압축 전/후"를 나란히 보여주는가
+ *   압축의 효과는 트리 모양이 바뀌는 것 자체가 아니라 **다음 find부터
+ *   전부 O(1)에 가까워진다는 것**이다. 그 전과 후의 트리를 같은 화면에
+ *   놓고 비교해야 "왜 아무 조작도 안 했는데 다음 조회가 빨라지는가"가
+ *   손에 잡힌다.
+ *
+ * ── opts (챕터가 넘기는 것. 이 주석이 명세다) ────────────────────────────────
+ *   n              : 원소 개수 (기본 8, 라벨은 0..n-1)
+ *   ops            : [["union",a,b] | ["find",a], ...]
+ *   strategy       : "rank" (기본, union-by-rank) | "size" (union-by-size) | "naive" (기준 없이 항상 a의 뿌리 아래 b를 붙임)
+ *   pathCompression: true(기본) | false
+ *   show           : ["forest","rankLabels","pathHighlight"] 중 원하는 것. 기본 전부
+ */
+(function () {
+  'use strict';
+  var K = window.WidgetKit;
+  if (!K) return;
+
+  var FONT = '-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif';
+  var MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace';
+  var MAX_N = 24, MAX_OPS = 40;
+
+  function isArr(v) { return !!v && typeof v === 'object' && typeof v.length === 'number' && typeof v !== 'string'; }
+  function clampInt(v, lo, hi, d) { var n = parseInt(v, 10); if (!isFinite(n)) return d; return Math.max(lo, Math.min(hi, n)); }
+  function truthy(v, d) { return v === undefined || v === null ? d : !!v; }
+
+  /* 표준 union-find. 압축·전략을 opts 로 갈아 끼운다.
+   * find 는 압축 도중 방문한 경로를 스텝에 기록해 위젯이 "이 노드들이
+   * 방금 뿌리에 직접 매달렸다"를 보여줄 수 있게 한다. */
+  function run(n, ops, strategy, compress) {
+    var parent = []; for (var i = 0; i < n; i++) parent.push(i);
+    var rank = new Array(n).fill(0);
+    var size = new Array(n).fill(1);
+
+    var steps = [];
+    function snap(kind, note, extra) {
+      var s = { kind: kind, note: note, parent: parent.slice(), rank: rank.slice(), size: size.slice() };
+      if (extra) for (var k in extra) s[k] = extra[k];
+      steps.push(s);
+    }
+    snap('init', n + '개 원소, 전부 자기 자신이 뿌리. 전략: ' +
+      (strategy === 'naive' ? '기준 없음' : strategy === 'size' ? 'union-by-size' : 'union-by-rank') +
+      (compress ? ' + 경로 압축' : ' (경로 압축 없음)') + '.');
+
+    function findPath(x) {
+      var path = [];
+      while (parent[x] !== x) { path.push(x); x = parent[x]; }
+      path.push(x);   // 마지막은 뿌리
+      return path;
+    }
+
+    function find(x, doCompress) {
+      var path = findPath(x);
+      var root = path[path.length - 1];
+      if (doCompress && path.length > 2) {
+        for (var i = 0; i < path.length - 1; i++) parent[path[i]] = root;
+      }
+      return { root: root, path: path };
+    }
+
+    ops.forEach(function (op) {
+      if (op[0] === 'find') {
+        var x = op[1];
+        var beforePath = findPath(x);
+        var r = find(x, compress);
+        if (compress && beforePath.length > 2) {
+          snap('find', 'find(' + x + ') — 뿌리 ' + r.root + '까지 경로 [' + beforePath.join(' → ') + ']를 밟았다. 압축 전.',
+            { path: beforePath, root: r.root, phase: 'before' });
+          snap('compress', 'find(' + x + ') 압축 — 경로의 모든 노드가 뿌리 ' + r.root + '에 직접 매달린다.',
+            { path: beforePath, root: r.root, phase: 'after' });
+        } else {
+          snap('find', 'find(' + x + ') = ' + r.root + '. 경로 [' + beforePath.join(' → ') + '].',
+            { path: beforePath, root: r.root, phase: 'after' });
+        }
+      } else {
+        var a = op[1], b = op[2];
+        var ra = find(a, compress).root, rb = find(b, compress).root;
+        if (ra === rb) {
+          snap('union-noop', 'union(' + a + ', ' + b + ') — 이미 같은 집합(뿌리 ' + ra + '). 아무 일도 안 한다.', { a: a, b: b });
+          return;
+        }
+        var attachFrom, attachTo;
+        if (strategy === 'naive') { attachFrom = rb; attachTo = ra; }
+        else if (strategy === 'size') {
+          if (size[ra] < size[rb]) { attachFrom = ra; attachTo = rb; } else { attachFrom = rb; attachTo = ra; }
+        } else {
+          if (rank[ra] < rank[rb]) { attachFrom = ra; attachTo = rb; }
+          else if (rank[ra] > rank[rb]) { attachFrom = rb; attachTo = ra; }
+          else { attachFrom = rb; attachTo = ra; rank[ra] += 1; }
+        }
+        parent[attachFrom] = attachTo;
+        size[attachTo] += size[attachFrom];
+        snap('union', 'union(' + a + ', ' + b + ') — 뿌리 ' + attachFrom + '을(를) 뿌리 ' + attachTo + ' 아래로 붙인다' +
+          (strategy !== 'naive' ? '(더 ' + (strategy === 'size' ? '작은 트리' : '낮은 랭크') + ' 쪽이 붙는다)' : '') + '.',
+          { a: a, b: b, from: attachFrom, to: attachTo });
+      }
+    });
+
+    return { steps: steps };
+  }
+
+  K.register('union-find', function (host, opts) {
+    var n = clampInt(opts.n, 2, MAX_N, 8);
+    var strategy = ['rank', 'size', 'naive'].indexOf(opts.strategy) >= 0 ? opts.strategy : 'rank';
+    var compress = truthy(opts.pathCompression, true);
+    var show = isArr(opts.show) ? opts.show.map(String) : ['forest', 'rankLabels', 'pathHighlight'];
+    var has = function (x) { return show.indexOf(x) >= 0; };
+
+    var rawOps = isArr(opts.ops) ? opts.ops : [];
+    var ops = [];
+    for (var i = 0; i < rawOps.length && ops.length < MAX_OPS; i++) {
+      var o = rawOps[i];
+      if (!isArr(o) || !o.length) continue;
+      if (o[0] === 'find' && o.length >= 2) {
+        var x = clampInt(o[1], 0, n - 1, 0);
+        ops.push(['find', x]);
+      } else if (o[0] === 'union' && o.length >= 3) {
+        var a = clampInt(o[1], 0, n - 1, 0), b = clampInt(o[2], 0, n - 1, 0);
+        ops.push(['union', a, b]);
+      }
+    }
+    if (!ops.length) ops = [['union', 0, 1], ['union', 2, 3], ['union', 1, 2]];
+
+    var data = run(n, ops, strategy, compress);
+    var ui = K.frame(host, { title: '유니온 파인드 — 경로 압축이 사슬을 납작하게 편다' });
+
+    (function legend() {
+      var T = K.tokens(ui.stage);
+      var items = [['뿌리', T.wGoal], ['방금 압축된 경로', T.accent], ['방문 경로', T.wPath]];
+      var el = K.el('div', 'wk-legend');
+      items.forEach(function (it) {
+        var sp = K.el('span'), ic = K.el('i');
+        ic.style.background = it[1];
+        sp.appendChild(ic); sp.appendChild(document.createTextNode(it[0]));
+        el.appendChild(sp);
+      });
+      ui.slot.appendChild(el);
+      K.onThemeChange(function () {
+        var T2 = K.tokens(ui.stage);
+        var cs = [T2.wGoal, T2.accent, T2.wPath];
+        Array.prototype.forEach.call(el.querySelectorAll('i'), function (nn, k) { nn.style.background = cs[k]; });
+      });
+    })();
+
+    var PAD = 12, LEVEL_H = 56, NODE_R = 15;
+
+    // 트리 레이아웃: 뿌리를 기준으로 자식들을 가로로 펼친다.
+    function buildForest(parent) {
+      var children = {}; for (var i = 0; i < n; i++) children[i] = [];
+      var roots = [];
+      for (var v = 0; v < n; v++) { if (parent[v] === v) roots.push(v); else children[parent[v]].push(v); }
+      return { children: children, roots: roots };
+    }
+    function subtreeWidth(v, children) {
+      if (!children[v].length) return 1;
+      return children[v].reduce(function (s, c) { return s + subtreeWidth(c, children); }, 0);
+    }
+    function depthOf(v, children) {
+      if (!children[v].length) return 1;
+      return 1 + Math.max.apply(null, children[v].map(function (c) { return depthOf(c, children); }));
+    }
+
+    function layout(w) {
+      var f = buildForest(data.steps[play ? play.index() : 0].parent);
+      var totalW = f.roots.reduce(function (s, r) { return s + subtreeWidth(r, f.children); }, 0);
+      var maxDepth = Math.max.apply(null, f.roots.map(function (r) { return depthOf(r, f.children); }).concat([1]));
+      var cellW = Math.max(40, Math.min(70, (w - PAD * 2) / Math.max(1, totalW)));
+      return { forest: f, totalW: totalW, cellW: cellW, height: PAD + maxDepth * LEVEL_H + 40 + PAD };
+    }
+
+    function draw(ctx, size, T) {
+      var l = layout(size.w);
+      var i = play ? play.index() : 0;
+      var st = data.steps[Math.min(i, data.steps.length - 1)];
+      var f = buildForest(st.parent);
+
+      var pathSet = {};
+      (st.path || []).forEach(function (v) { pathSet[v] = true; });
+
+      var pos = {};
+      var x0 = PAD;
+      f.roots.forEach(function (r) {
+        var w = subtreeWidth(r, f.children) * l.cellW;
+        (function place(v, cx, depth) {
+          pos[v] = { x: cx, y: PAD + depth * LEVEL_H + 20 };
+          var kids = f.children[v];
+          if (!kids.length) return;
+          var kw = kids.reduce(function (s, c) { return s + subtreeWidth(c, f.children); }, 0) * l.cellW;
+          var kx = cx - kw / 2;
+          kids.forEach(function (c) {
+            var cw = subtreeWidth(c, f.children) * l.cellW;
+            place(c, kx + cw / 2, depth + 1);
+            kx += cw;
+          });
+        })(r, x0 + w / 2, 0);
+        x0 += w;
+      });
+
+      ctx.save();
+      // 간선
+      for (var v = 0; v < n; v++) {
+        if (st.parent[v] === v) continue;
+        var p1 = pos[v], p2 = pos[st.parent[v]];
+        if (!p1 || !p2) continue;
+        var isCompressed = st.kind === 'compress' && pathSet[v] && v !== st.root;
+        ctx.strokeStyle = isCompressed ? T.accent : T.border;
+        ctx.lineWidth = isCompressed ? 2 : 1.2;
+        ctx.beginPath(); ctx.moveTo(p1.x, p1.y - NODE_R); ctx.lineTo(p2.x, p2.y + NODE_R); ctx.stroke();
+      }
+      // 노드
+      for (var vv = 0; vv < n; vv++) {
+        var p = pos[vv];
+        if (!p) continue;
+        var isRoot = st.parent[vv] === vv;
+        var onPath = pathSet[vv];
+        var fill = T.bgElev, stroke = T.border, textCol = T.fg;
+        if (isRoot) { fill = T.wGoal; textCol = T.bg; stroke = T.wGoal; }
+        if (onPath && st.kind === 'find') { stroke = T.wPath; }
+        if (onPath && st.kind === 'compress') { fill = isRoot ? T.wGoal : T.accent; textCol = T.bg; stroke = T.accent; }
+        ctx.beginPath(); ctx.arc(p.x, p.y, NODE_R, 0, Math.PI * 2);
+        ctx.fillStyle = fill; ctx.fill();
+        ctx.strokeStyle = stroke; ctx.lineWidth = (onPath || isRoot) ? 2 : 1; ctx.stroke();
+        ctx.fillStyle = textCol; ctx.font = '600 12px ' + MONO;
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText(String(vv), p.x, p.y);
+        if (has('rankLabels') && strategy !== 'naive') {
+          var lbl = strategy === 'size' ? 's' + st.size[vv] : 'r' + st.rank[vv];
+          ctx.font = '9px ' + MONO; ctx.fillStyle = T.fgFaint;
+          ctx.fillText(lbl, p.x, p.y + NODE_R + 10);
+        }
+      }
+      ctx.restore();
+
+      var yEnd = PAD + Math.max.apply(null, Object.keys(pos).map(function (k) { return pos[k].y; }).concat([PAD])) + NODE_R + 24;
+      ctx.save();
+      ctx.font = '11px ' + FONT; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+      ctx.fillStyle = st.kind === 'compress' ? T.accent : T.fgDim;
+      var lines = wrapText(ctx, st.note, size.w - PAD * 2);
+      lines.forEach(function (t, idx) { ctx.fillText(t, PAD, yEnd + idx * 15); });
+      ctx.restore();
+    }
+
+    function wrapText(ctx, text, maxW) {
+      var words = text.split(' '), lines = [], cur = '';
+      for (var i = 0; i < words.length; i++) {
+        var t = cur ? cur + ' ' + words[i] : words[i];
+        if (ctx.measureText(t).width > maxW && cur) { lines.push(cur); cur = words[i]; } else cur = t;
+      }
+      if (cur) lines.push(cur);
+      return lines;
+    }
+
+    var cv = K.canvas(ui.stage, { height: function (w) { return layout(w).height; }, draw: draw });
+    var play = K.player(ui, {
+      total: function () { return data.steps.length; },
+      render: function () { cv.redraw(); },
+      label: function (i) { return data.steps[Math.min(i, data.steps.length - 1)].note || ''; }
+    });
+    play.draw();
+
+    host.__widget = {
+      root: function (x) { var st = data.steps[data.steps.length - 1]; var p = x; while (st.parent[p] !== p) p = st.parent[p]; return p; },
+      connected: function (a, b) { var w = this; return w.root(a) === w.root(b); },
+      steps: function () { return data.steps.length; },
+      goto: function (i) { play.goto(i); },
+      finalParent: function () { return data.steps[data.steps.length - 1].parent.slice(); }
     };
   });
 })();
